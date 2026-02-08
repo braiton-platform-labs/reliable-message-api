@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: idempotency-cleanup
+  labels:
+    app: api
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: api
+        spec:
+          affinity:
+            podAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        app: api
+                    topologyKey: kubernetes.io/hostname
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: REPLACE_ECR_IMAGE
+              imagePullPolicy: IfNotPresent
+              command: ["python", "scripts/cleanup_idempotency.py"]
+              envFrom:
+                - secretRef:
+                    name: app-secrets
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "128Mi"
+          imagePullSecrets:
+            - name: ecr-pull

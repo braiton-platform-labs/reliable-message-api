@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kong-poststart
+  labels:
+    app: kong
+
+data:
+  poststart-bootstrap.sh: |
+    #!/usr/bin/env sh
+    set -e
+
+    until curl -sS http://127.0.0.1:8001/status >/dev/null; do
+      echo "waiting for kong admin";
+      sleep 2;
+    done
+
+    curl -sS -X PUT http://127.0.0.1:8001/services/api \
+      -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+      -d name=api \
+      -d url=http://api.dev.svc.cluster.local:80
+
+    curl -sS -X PUT http://127.0.0.1:8001/routes/api \
+      -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+      -d name=api \
+      -d paths[]=/ \
+      -d strip_path=false \
+      -d service.name=api
+
+    curl -sS -X PUT http://127.0.0.1:8001/rbac/users/${KONG_ADMIN_GUI_USER} \
+      -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+      -d name=${KONG_ADMIN_GUI_USER} \
+      -d user_token=${KONG_ADMIN_TOKEN} \
+      -d password=${KONG_ADMIN_GUI_PASSWORD} || true
+
+    curl -sS -X POST http://127.0.0.1:8001/rbac/users/${KONG_ADMIN_GUI_USER}/roles \
+      -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+      -d roles=admin || true
+
+    if [ -n "${KONG_RBAC_USERS}" ]; then
+      IFS=','; \
+      for entry in ${KONG_RBAC_USERS}; do \
+        user=$(echo "$entry" | cut -d: -f1); \
+        pass=$(echo "$entry" | cut -d: -f2-); \
+        if [ -n "$user" ] && [ -n "$pass" ]; then \
+          curl -sS -X PUT http://127.0.0.1:8001/rbac/users/${user} \
+            -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+            -d name=${user} \
+            -d user_token=${KONG_ADMIN_TOKEN} \
+            -d password=${pass} || true; \
+          curl -sS -X POST http://127.0.0.1:8001/rbac/users/${user}/roles \
+            -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+            -d roles=admin || true; \
+        fi; \
+      done; \
+    fi

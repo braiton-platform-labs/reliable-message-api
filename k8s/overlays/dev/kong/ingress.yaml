@@ -1,0 +1,54 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kong-admin
+  labels:
+    app: kong
+  annotations:
+    konghq.com/protocols: "http"
+    konghq.com/strip-path: "true"
+    konghq.com/plugins: "kong-admin-ip-whitelist"
+spec:
+  ingressClassName: kong
+  tls:
+    - hosts:
+        - kong.local.dev
+      secretName: kong-local-tls
+  rules:
+    - host: kong.local.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kong-admin
+                port:
+                  number: 8002
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  labels:
+    app: api
+  annotations:
+    konghq.com/protocols: "http"
+    konghq.com/strip-path: "false"
+spec:
+  ingressClassName: kong
+  tls:
+    - hosts:
+        - api.local.dev
+      secretName: kong-local-tls
+  rules:
+    - host: api.local.dev
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kong-proxy
+                port:
+                  number: 80

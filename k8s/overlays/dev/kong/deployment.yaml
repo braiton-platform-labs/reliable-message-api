@@ -1,0 +1,175 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kong
+  labels:
+    app: kong
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kong
+  template:
+    metadata:
+      labels:
+        app: kong
+    spec:
+      initContainers:
+        - name: kong-migrations
+          image: kong:3.6.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              kong migrations bootstrap || kong migrations up
+              kong migrations finish || true
+          env:
+            - name: KONG_DATABASE
+              value: "postgres"
+            - name: KONG_PG_HOST
+              value: "postgres"
+            - name: KONG_PG_PORT
+              value: "5432"
+            - name: KONG_PG_DATABASE
+              value: "kong"
+            - name: KONG_PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: POSTGRES_USER
+            - name: KONG_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_PG_PASSWORD
+            - name: KONG_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_ADMIN_TOKEN
+            - name: KONG_ADMIN_API_AUTH
+              value: "rbac"
+            - name: KONG_ENFORCE_RBAC
+              value: "on"
+            - name: KONG_ADMIN_GUI_SESSION_CONF
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_ADMIN_GUI_SESSION_CONF
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+      containers:
+        - name: kong
+          image: kong:3.6.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: proxy
+            - containerPort: 8001
+              name: admin
+            - containerPort: 8002
+              name: manager
+          env:
+            - name: KONG_DATABASE
+              value: "postgres"
+            - name: KONG_PG_HOST
+              value: "postgres"
+            - name: KONG_PG_PORT
+              value: "5432"
+            - name: KONG_PG_DATABASE
+              value: "kong"
+            - name: KONG_PG_USER
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: POSTGRES_USER
+            - name: KONG_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_PG_PASSWORD
+            - name: KONG_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_ADMIN_TOKEN
+            - name: KONG_ADMIN_GUI_AUTH
+              value: "basic-auth"
+            - name: KONG_ADMIN_GUI_SESSION_CONF
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_ADMIN_GUI_SESSION_CONF
+            - name: KONG_ADMIN_GUI_USER
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_ADMIN_GUI_USER
+            - name: KONG_ADMIN_GUI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_ADMIN_GUI_PASSWORD
+            - name: KONG_RBAC_USERS
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: KONG_RBAC_USERS
+            - name: KONG_PROXY_LISTEN
+              value: "0.0.0.0:8000, 0.0.0.0:8443 ssl"
+            - name: KONG_ADMIN_LISTEN
+              value: "0.0.0.0:8001"
+            - name: KONG_ADMIN_GUI_LISTEN
+              value: "0.0.0.0:8002"
+            - name: KONG_ADMIN_GUI_URL
+              value: "http://localhost:8002"
+            - name: KONG_ADMIN_API_AUTH
+              value: "rbac"
+            - name: KONG_ENFORCE_RBAC
+              value: "on"
+            - name: KONG_PROXY_ACCESS_LOG
+              value: "/dev/stdout"
+            - name: KONG_PROXY_ERROR_LOG
+              value: "/dev/stderr"
+            - name: KONG_LOG_LEVEL
+              value: "notice"
+          volumeMounts:
+            - name: kong-poststart
+              mountPath: /kong/poststart
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          lifecycle:
+            postStart:
+              exec:
+                command: ["sh", "/kong/poststart/poststart-bootstrap.sh"]
+      volumes:
+        - name: kong-poststart
+          configMap:
+            name: kong-poststart

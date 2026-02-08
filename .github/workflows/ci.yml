@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      docker:
+        image: docker:24.0.5-dind
+        options: >-
+          --privileged
+        ports:
+          - 2375:2375
+    env:
+      DOCKER_HOST: tcp://localhost:2375
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .[dev]
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Typecheck
+        run: mypy app tests
+
+      - name: K8s Validate
+        run: make k8s-validate
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Security (bandit)
+        run: bandit -r app
+
+      - name: Security (pip-audit)
+        run: pip-audit
+
+      - name: Build container
+        run: docker build -f docker/Dockerfile .

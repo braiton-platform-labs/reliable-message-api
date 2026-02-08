@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: datadog-agent
+  labels:
+    app: datadog-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: datadog-agent
+  ports:
+    - name: trace
+      port: 8126
+      targetPort: 8126
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datadog-agent
+  labels:
+    app: datadog-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: datadog-agent
+  template:
+    metadata:
+      labels:
+        app: datadog-agent
+    spec:
+      containers:
+        - name: datadog-agent
+          image: gcr.io/datadoghq/agent:7
+          ports:
+            - containerPort: 8126
+              name: trace
+          env:
+            - name: DD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DD_API_KEY
+            - name: DD_APM_ENABLED
+              value: "true"
+            - name: DD_LOGS_ENABLED
+              value: "true"
+            - name: DD_DOGSTATSD_NON_LOCAL_TRAFFIC
+              value: "true"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

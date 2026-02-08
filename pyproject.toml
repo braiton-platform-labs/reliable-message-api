@@ -1,0 +1,50 @@
+[project]
+name = "reliable-message-api"
+version = "0.1.0"
+description = "Production-minded Message API with FastAPI and PostgreSQL"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Your Team" }]
+
+dependencies = [
+  "fastapi>=0.110.0",
+  "uvicorn[standard]>=0.29.0",
+  "sqlalchemy>=2.0.25",
+  "psycopg2-binary>=2.9.9",
+  "alembic>=1.13.1",
+  "pydantic>=2.6.0",
+  "pydantic-settings>=2.2.1",
+  "prometheus-client>=0.20.0",
+  "ddtrace>=2.8.0",
+  "datadog>=0.49.1",
+  "python-json-logger>=2.0.7",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
+  "testcontainers>=4.4.0",
+  "schemathesis>=3.27.0",
+  "ruff>=0.3.0",
+  "mypy>=1.8.0",
+  "bandit>=1.7.8",
+  "pip-audit>=2.7.0",
+]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
