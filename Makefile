@@ -2,7 +2,7 @@
 	dev-up dev-fg dev-reload dev-rollout dev-rollout-all dev-port dev-port-bg dev-port-stop dev-port-status dev-port-logs dev-reset dev-verify dev dev-status \
 	dev-logs dev-psql dev-port-kong-admin dev-tls dev-kong-whitelist dev-kong-user dev-kong-user-remove dev-kong-crds-install \
 	dev-hosts-status dev-hosts-apply dev-hosts-remove dev-hosts-status-win dev-hosts-apply-win dev-hosts-remove-win \
-	k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin
+	k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin doctor bootstrap bootstrap-full first-run
 
 TOOL_VERSIONS_FILE ?= hack/tool-versions.env
 -include $(TOOL_VERSIONS_FILE)
@@ -29,6 +29,9 @@ DEV_WAIT_TIMEOUT ?= 300s
 
 BIN_DIR ?= bin
 
+# Prefer repo-local tools installed into ./bin (e.g., via `make bootstrap` / `./hack/bootstrap.sh`).
+export PATH := $(BIN_DIR):$(PATH)
+
 # Cross-platform helpers (Windows uses .exe).
 EXE ?=
 ifeq ($(OS),Windows_NT)
@@ -51,6 +54,9 @@ KUBECONFORM_BIN ?= $(BIN_DIR)/kubeconform$(EXE)
 
 help:
 	@echo "Targets:"
+	@echo "  make first-run          First time: bootstrap tools + bring up dev environment"
+	@echo "  make bootstrap          Install pinned tools into ./bin (fast; no sysctl/apt changes)"
+	@echo "  make doctor             Check your local toolchain/environment"
 	@echo "  make dev                Full local dev flow (apply + restart + port-forward in background)"
 	@echo "  make dev-fg             Same as dev, but keeps port-forward in foreground (Ctrl+C to stop)"
 	@echo "  make dev-up             Provision/apply/restart/wait (no port-forward)"
@@ -61,6 +67,27 @@ help:
 	@echo "  make dev-secrets-apply   Apply dev/app-secrets from $(ENV_FILE)"
 	@echo "  make k8s-validate        Validate k8s manifests with kubeconform"
 	@echo "  make dev-clean           Clean dev namespace, kind cluster, and build cache"
+
+doctor:
+	@./hack/doctor.sh
+
+# Lightweight bootstrap for onboarding: installs pinned binaries into ./bin without changing sysctl
+# or running apt maintenance (no sudo required for most machines).
+bootstrap:
+	@BOOTSTRAP_INSTALL_MODE=local \
+	  BOOTSTRAP_ENFORCE_GLOBAL_BIN=0 \
+	  BOOTSTRAP_APT_MAINTENANCE=0 \
+	  BOOTSTRAP_TUNE_SYSCTL=0 \
+	  BOOTSTRAP_SYSCTL_PERSIST=0 \
+	  ./hack/bootstrap.sh
+
+# Full bootstrap (may require sudo and may tune sysctl for kind stability).
+bootstrap-full:
+	@./hack/bootstrap.sh
+
+first-run:
+	@$(MAKE) bootstrap
+	@$(MAKE) dev
 
 kind-up:
 	@cluster="$(KIND_CLUSTER_NAME)"; \

@@ -25,6 +25,17 @@ Run:
 make dev
 ```
 
+First time setup (recommended):
+```bash
+make bootstrap
+make dev
+```
+
+Or as a single command:
+```bash
+make first-run
+```
+
 Tip: run multiple clusters by overriding the default name:
 ```bash
 KIND_CLUSTER_NAME=my-dev make dev
@@ -93,6 +104,9 @@ Optional tool check:
 
 | Goal | Command |
 | --- | --- |
+| First time setup (tools + dev) | `make first-run` |
+| Install pinned tools into `./bin` | `make bootstrap` |
+| Check your local environment | `make doctor` |
 | Start everything (kind + secrets + apply + port-forward) | `make dev` |
 | Fast loop after code changes (build+load+restart API) | `make dev-reload` |
 | Update `dev/app-secrets` after editing `.env` | `make dev-secrets-apply && make dev-rollout` |
