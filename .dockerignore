@@ -1,0 +1,36 @@
+.git
+.github
+.circleci
+
+# Local secrets / env
+.env
+.env.*
+!.env.example
+
+# Python caches / venvs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+
+# Dev-only / not needed at runtime
+bin/
+hack/
+k8s/
+postman/
+tests/
+.pre-commit-config.yaml
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+

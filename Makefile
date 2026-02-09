@@ -1,5 +1,5 @@
 .PHONY: help test lint format kind-up kind-down dev-context dev-env-init dev-secrets-apply dev-build dev-kind-load dev-apply dev-dd \
-	dev-up dev-fg dev-rollout dev-rollout-all dev-port dev-port-bg dev-port-stop dev-port-status dev-port-logs dev-reset dev-verify dev dev-status \
+	dev-up dev-fg dev-reload dev-rollout dev-rollout-all dev-port dev-port-bg dev-port-stop dev-port-status dev-port-logs dev-reset dev-verify dev dev-status \
 	dev-logs dev-psql dev-port-kong-admin dev-tls dev-kong-whitelist dev-kong-user dev-kong-user-remove dev-kong-crds-install \
 	dev-hosts-status dev-hosts-apply dev-hosts-remove dev-hosts-status-win dev-hosts-apply-win dev-hosts-remove-win \
 	k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin
@@ -54,6 +54,7 @@ help:
 	@echo "  make dev                Full local dev flow (apply + restart + port-forward in background)"
 	@echo "  make dev-fg             Same as dev, but keeps port-forward in foreground (Ctrl+C to stop)"
 	@echo "  make dev-up             Provision/apply/restart/wait (no port-forward)"
+	@echo "  make dev-reload         Fast loop: build+load and restart only the API"
 	@echo "  make dev-port-bg        Start/restart port-forward in background and exit"
 	@echo "  make dev-port-stop      Stop background port-forward (if running)"
 	@echo "  make dev-dd             Apply dev-dd overlay (includes Datadog agent)"
@@ -225,16 +226,49 @@ dev-env-init:
 	@$(PYTHON) scripts/dev_env.py init --env-file "$(ENV_FILE)"
 
 dev-build:
-	docker build -f docker/Dockerfile -t $(IMAGE) --label project=reliable-message-api .
+	DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t $(IMAGE) --label project=reliable-message-api .
 
 dev-kind-load: dev-context dev-build
-	kind load docker-image $(IMAGE) --name $(KIND_CLUSTER_NAME)
+	@set -e; \
+	cluster="$(KIND_CLUSTER_NAME)"; \
+	image="$(IMAGE)"; \
+	nodes="$$(kind get nodes --name "$$cluster" 2>/dev/null || true)"; \
+	if [ -z "$$nodes" ]; then \
+		echo "ERROR: kind cluster '$$cluster' not found (is it running?)"; \
+		exit 1; \
+	fi; \
+	cp_node="$$(printf "%s\n" "$$nodes" | grep -- '-control-plane$$' | head -n 1 || true)"; \
+	workers_csv="$$(printf "%s\n" "$$nodes" | grep -v -- '-control-plane$$' | tr '\n' ',' | sed 's/,$$//')"; \
+	if [ -n "$$workers_csv" ]; then \
+		if [ -n "$$cp_node" ] && kubectl get node "$$cp_node" -o jsonpath='{range .spec.taints[*]}{.key}{"="}{.effect}{"\n"}{end}' 2>/dev/null | grep -Eq 'node-role.kubernetes.io/(control-plane|master)=NoSchedule'; then \
+			echo "==> Loading image into kind worker nodes (skip tainted control-plane): $$workers_csv"; \
+			kind load docker-image "$$image" --name "$$cluster" --nodes "$$workers_csv"; \
+		else \
+			echo "==> Control-plane appears schedulable (or taints unknown); loading image into all kind nodes"; \
+			kind load docker-image "$$image" --name "$$cluster"; \
+		fi; \
+	else \
+		echo "==> No workers detected; loading image into all kind nodes"; \
+		kind load docker-image "$$image" --name "$$cluster"; \
+	fi
 
 dev-apply: dev-context kustomize-bin dev-kind-load dev-kong-crds-install
 	$(KUSTOMIZE_BIN) build k8s/overlays/dev | kubectl apply -f -
 
 dev-dd: dev-context kustomize-bin dev-kind-load dev-kong-crds-install
 	$(KUSTOMIZE_BIN) build k8s/overlays/dev-dd | kubectl apply -f -
+
+dev-reload: dev-kind-load
+	@set -e; \
+	if ! kubectl -n dev get deployment/api >/dev/null 2>&1; then \
+		echo "ERROR: deployment/api not found in namespace dev. Run: make dev-up"; \
+		exit 1; \
+	fi; \
+	echo "==> Restarting API (to pick up the latest local image)..."; \
+	kubectl -n dev rollout restart deployment/api >/dev/null; \
+	echo "==> Waiting for API rollout..."; \
+	kubectl -n dev rollout status deployment/api --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> API rollout OK."
 
 dev-rollout: dev-context
 	@set -e; \
