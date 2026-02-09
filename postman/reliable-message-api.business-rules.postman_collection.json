@@ -1,0 +1,750 @@
+{
+  "info": {
+    "_postman_id": "b2e4c9d1-3d7c-4b8d-9c0c-0c2d5a2a4c11",
+    "name": "Reliable Message API - Business Rules (Local)",
+    "description": "Postman collection to validate business rules: validation, dedupe (normalization), and idempotency.\n\nIt also validates operational endpoints: /ready, /stats, and /metrics.\n\nPrereqs:\n- make dev (or make dev-up + make dev-port-bg)\n- /etc/hosts has api.local.dev (make dev-hosts-apply)\n\nIf HTTPS fails in Postman, disable SSL verification (Settings -> General) or trust the mkcert root CA on your machine.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "00 - Init (set run variables + health)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const runId = pm.variables.replaceIn('{{$timestamp}}') + '-' + pm.variables.replaceIn('{{$randomInt}}');",
+              "pm.collectionVariables.set('runId', runId);",
+              "pm.collectionVariables.set('dedupeToken', runId);",
+              "pm.collectionVariables.set('dedupeMessage1', `Hello   WORLD ${runId}`);",
+              "pm.collectionVariables.set('dedupeMessage2', `  hello world ${runId}  `);",
+              "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));",
+              "pm.collectionVariables.set('idempotencyMessage', `Idempotency ${runId}`);",
+              "pm.collectionVariables.set('tooLongMessage', 'a'.repeat(201));",
+              "pm.collectionVariables.unset('createdMessageId');",
+              "pm.collectionVariables.unset('idempotencyMessageId');"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets, then rerun.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('health: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('health body: status ok', function () {",
+              "  pm.expect(pm.response.json().status).to.eql('ok');",
+              "});",
+              "pm.test('X-Request-Id present', function () {",
+              "  pm.expect(pm.response.headers.get('X-Request-Id')).to.be.ok;",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "url": "{{baseUrl}}/health"
+      }
+    },
+    {
+      "name": "01 - Reset messages",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('reset: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('reset body: status ok', function () {",
+              "  pm.expect(pm.response.json().status).to.eql('ok');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "url": "{{baseUrl}}/messages/reset"
+      }
+    },
+    {
+      "name": "02 - Create message (happy path)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('create: 201', function () {",
+              "  pm.response.to.have.status(201);",
+              "});",
+              "pm.test('create body has id/message/created_at', function () {",
+              "  const json = pm.response.json();",
+              "  pm.expect(json.id).to.be.a('string');",
+              "  pm.expect(json.message).to.be.a('string');",
+              "  pm.expect(json.created_at).to.be.a('string');",
+              "});",
+              "pm.collectionVariables.set('createdMessageId', pm.response.json().id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"Hello {{runId}} from Postman\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "03 - Create message for dedupe (normalized seed)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('seed: 201', function () {",
+              "  pm.response.to.have.status(201);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"{{dedupeMessage1}}\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "04 - Dedupe (normalized) should 409 duplicate",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('duplicate: 409', function () {",
+              "  pm.response.to.have.status(409);",
+              "});",
+              "pm.test('duplicate error_code', function () {",
+              "  pm.expect(pm.response.json().error_code).to.eql('duplicate');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"{{dedupeMessage2}}\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "05 - Validation: empty message should 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('empty: 400', function () {",
+              "  pm.response.to.have.status(400);",
+              "});",
+              "pm.test('empty error_code invalid_request', function () {",
+              "  pm.expect(pm.response.json().error_code).to.eql('invalid_request');",
+              "});",
+              "pm.test('details include empty', function () {",
+              "  const details = pm.response.json().details || [];",
+              "  pm.expect(details).to.include('message must not be empty');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"   \"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "06 - Validation: too short should 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('too short: 400', function () {",
+              "  pm.response.to.have.status(400);",
+              "});",
+              "pm.test('details include min length', function () {",
+              "  const details = pm.response.json().details || [];",
+              "  pm.expect(details).to.include('message must be at least 5 characters');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"a1\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "07 - Validation: no alphanumeric should 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('no alnum: 400', function () {",
+              "  pm.response.to.have.status(400);",
+              "});",
+              "pm.test('details include alphanumeric rule', function () {",
+              "  const details = pm.response.json().details || [];",
+              "  pm.expect(details).to.include('message must contain at least one alphanumeric character');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"!!!!!\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "08 - Validation: too long should 400",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('too long: 400', function () {",
+              "  pm.response.to.have.status(400);",
+              "});",
+              "pm.test('details include max length', function () {",
+              "  const details = pm.response.json().details || [];",
+              "  pm.expect(details).to.include('message must be at most 200 characters');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"{{tooLongMessage}}\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "09 - Idempotency: create (201)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('idempotency create: 201', function () {",
+              "  pm.response.to.have.status(201);",
+              "});",
+              "pm.collectionVariables.set('idempotencyMessageId', pm.response.json().id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" },
+          { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"{{idempotencyMessage}}\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "10 - Idempotency: replay same key (200, same id)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('idempotency replay: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('idempotency replay returns same id', function () {",
+              "  const expected = pm.collectionVariables.get('idempotencyMessageId');",
+              "  const actual = pm.response.json().id;",
+              "  pm.expect(actual).to.eql(expected);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" },
+          { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"{{idempotencyMessage}}\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "11 - Idempotency: conflict (409)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('idempotency conflict: 409', function () {",
+              "  pm.response.to.have.status(409);",
+              "});",
+              "pm.test('idempotency conflict error_code', function () {",
+              "  pm.expect(pm.response.json().error_code).to.eql('idempotency_conflict');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" },
+          { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"message\": \"{{idempotencyMessage}} changed\"\n}"
+        },
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "12 - Read created message by id (200)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('read: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('read returns expected id', function () {",
+              "  const expected = pm.collectionVariables.get('createdMessageId');",
+              "  const actual = pm.response.json().id;",
+              "  pm.expect(actual).to.eql(expected);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "url": "{{baseUrl}}/messages/{{createdMessageId}}"
+      }
+    },
+    {
+      "name": "13 - Read all messages (200)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('read all: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('read all: returns array', function () {",
+              "  pm.expect(pm.response.json()).to.be.an('array');",
+              "});",
+              "pm.test('read all: contains createdMessageId', function () {",
+              "  const expected = pm.collectionVariables.get('createdMessageId');",
+              "  const items = pm.response.json();",
+              "  const found = items.some((m) => m.id === expected);",
+              "  pm.expect(found).to.eql(true);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "url": "{{baseUrl}}/messages"
+      }
+    },
+    {
+      "name": "14 - Delete created message by id (200)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('delete: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('delete body: status deleted', function () {",
+              "  pm.expect(pm.response.json().status).to.eql('deleted');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "url": "{{baseUrl}}/messages/{{createdMessageId}}"
+      }
+    },
+    {
+      "name": "15 - Read deleted message by id should 404",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('read deleted: 404', function () {",
+              "  pm.response.to.have.status(404);",
+              "});",
+              "pm.test('read deleted error_code: not_found', function () {",
+              "  pm.expect(pm.response.json().error_code).to.eql('not_found');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "url": "{{baseUrl}}/messages/{{createdMessageId}}"
+      }
+    },
+    {
+      "name": "16 - Readiness (DB) should be ready (200)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('ready: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('ready body: status ready', function () {",
+              "  pm.expect(pm.response.json().status).to.eql('ready');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/ready"
+      }
+    },
+    {
+      "name": "17 - Stats (JSON) should include DB counts",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('stats: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('stats has db counts', function () {",
+              "  const json = pm.response.json();",
+              "  pm.expect(json.db).to.be.an('object');",
+              "  pm.expect(json.db.messages_stored).to.be.a('number');",
+              "  pm.expect(json.db.idempotency_keys_stored).to.be.a('number');",
+              "});",
+              "pm.test('stats has request/message counters', function () {",
+              "  const json = pm.response.json();",
+              "  pm.expect(json.requests.total).to.be.a('number');",
+              "  pm.expect(json.messages.created).to.be.a('number');",
+              "  pm.expect(json.messages.invalid).to.be.a('number');",
+              "  pm.expect(json.messages.duplicate).to.be.a('number');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "application/json" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "url": "{{baseUrl}}/stats"
+      }
+    },
+    {
+      "name": "18 - Metrics (Prometheus) should include API counters",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 403) {",
+              "  pm.test('API key configured', function () {",
+              "    pm.expect.fail('Got 403. If REQUIRE_API_KEY=true, set apiKey in your Postman environment to match API_KEY in dev/app-secrets.');",
+              "  });",
+              "  return;",
+              "}",
+              "pm.test('metrics: 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "pm.test('metrics content-type looks like prometheus text', function () {",
+              "  const ct = pm.response.headers.get('Content-Type') || '';",
+              "  pm.expect(ct).to.include('text/plain');",
+              "});",
+              "pm.test('metrics contains http_requests_total', function () {",
+              "  pm.expect(pm.response.text()).to.include('http_requests_total');",
+              "});",
+              "pm.test('metrics contains messages_created_total', function () {",
+              "  pm.expect(pm.response.text()).to.include('messages_created_total');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Accept", "value": "text/plain" },
+          { "key": "X-API-Key", "value": "{{apiKey}}" }
+        ],
+        "url": "{{baseUrl}}/metrics"
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "https://api.local.dev:8443" },
+    { "key": "apiKey", "value": "" },
+    { "key": "runId", "value": "" },
+    { "key": "createdMessageId", "value": "" },
+    { "key": "dedupeToken", "value": "" },
+    { "key": "dedupeMessage1", "value": "" },
+    { "key": "dedupeMessage2", "value": "" },
+    { "key": "tooLongMessage", "value": "" },
+    { "key": "idempotencyKey", "value": "" },
+    { "key": "idempotencyMessage", "value": "" },
+    { "key": "idempotencyMessageId", "value": "" }
+  ]
+}

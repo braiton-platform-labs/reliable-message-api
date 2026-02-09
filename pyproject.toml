@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Production-minded Message API with FastAPI and PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Your Team" }]
 
 dependencies = [
@@ -24,6 +24,14 @@ dependencies = [
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+# Avoid setuptools auto-discovering non-Python top-level dirs (k8s/, hack/, docker/, etc.).
+include = ["app*"]
+exclude = ["tests*", "k8s*", "hack*", "docker*", "scripts*"]
 
 [project.optional-dependencies]
 dev = [

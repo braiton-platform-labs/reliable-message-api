@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Dict
 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -32,9 +33,15 @@ MESSAGES_INVALID = Counter("messages_invalid_total", "Invalid message requests")
 @dataclass
 class Stats:
     counters: Dict[str, int] = field(default_factory=dict)
+    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def inc(self, key: str, amount: int = 1) -> None:
-        self.counters[key] = self.counters.get(key, 0) + amount
+        with self._lock:
+            self.counters[key] = self.counters.get(key, 0) + amount
+
+    def snapshot(self) -> Dict[str, int]:
+        with self._lock:
+            return dict(self.counters)
 
 
 stats = Stats()
@@ -54,32 +61,59 @@ def metrics_response() -> tuple[bytes, str]:
 
 
 def record_request(method: str, path: str, status_code: int, latency_ms: float) -> None:
-    REQUEST_COUNT.labels(method=method, path=path, status_code=str(status_code)).inc()
-    REQUEST_LATENCY.labels(method=method, path=path).observe(latency_ms / 1000.0)
-    if _configure_statsd():
-        statsd.increment("http.requests.by_route", tags=[f"method:{method}", f"path:{path}"])
-        statsd.histogram("request.latency", latency_ms, tags=[f"path:{path}"])
+    settings = get_settings()
+    method = method.upper()
+    status_code_str = str(status_code)
+
+    if settings.metrics_enabled:
+        REQUEST_COUNT.labels(method=method, path=path, status_code=status_code_str).inc()
+        REQUEST_LATENCY.labels(method=method, path=path).observe(latency_ms / 1000.0)
+        if _configure_statsd():
+            statsd.increment(
+                "http.requests.by_route",
+                tags=[
+                    f"method:{method}",
+                    f"path:{path}",
+                    f"code:{status_code_str}",
+                ],
+            )
+            statsd.histogram("request.latency", latency_ms, tags=[f"path:{path}"])
+
+    if settings.stats_enabled:
+        stats.inc("requests.total")
+        stats.inc(f"requests.by_method.{method}")
+        stats.inc(f"requests.by_path.{path}")
+        stats.inc(f"responses.by_status.{status_code_str}")
 
 
 def record_message_created() -> None:
-    MESSAGES_CREATED.inc()
-    stats.inc("messages.created")
-    if _configure_statsd():
-        statsd.increment("messages.created")
+    settings = get_settings()
+    if settings.metrics_enabled:
+        MESSAGES_CREATED.inc()
+        if _configure_statsd():
+            statsd.increment("messages.created")
+    if settings.stats_enabled:
+        stats.inc("messages.created")
 
 
 def record_message_duplicate() -> None:
-    MESSAGES_DUPLICATE.inc()
-    stats.inc("messages.duplicate")
-    if _configure_statsd():
-        statsd.increment("messages.duplicate")
+    settings = get_settings()
+    if settings.metrics_enabled:
+        MESSAGES_DUPLICATE.inc()
+        if _configure_statsd():
+            statsd.increment("messages.duplicate")
+    if settings.stats_enabled:
+        stats.inc("messages.duplicate")
 
 
 def record_message_invalid() -> None:
-    MESSAGES_INVALID.inc()
-    stats.inc("messages.invalid")
-    if _configure_statsd():
-        statsd.increment("messages.invalid")
+    settings = get_settings()
+    if settings.metrics_enabled:
+        MESSAGES_INVALID.inc()
+        if _configure_statsd():
+            statsd.increment("messages.invalid")
+    if settings.stats_enabled:
+        stats.inc("messages.invalid")
 
 
 def now_ms() -> float:

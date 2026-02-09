@@ -27,7 +27,11 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             request_id_ctx.reset(token)
         duration_ms = (time.perf_counter() - start) * 1000.0
         response.headers["X-Request-Id"] = req_id
-        record_request(request.method, request.url.path, response.status_code, duration_ms)
+        # Use the resolved route template for metrics (e.g. "/messages/{message_id}"),
+        # otherwise we'd create high-cardinality metrics labels with UUIDs.
+        route = request.scope.get("route")
+        path_template = getattr(route, "path", None) or request.url.path
+        record_request(request.method, path_template, response.status_code, duration_ms)
         log_info(
             "request",
             path=request.url.path,
@@ -45,6 +49,9 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         settings = get_settings()
+        # Liveness/readiness must stay accessible for kube probes even when auth is enabled.
+        if request.url.path in {"/health", "/ready"}:
+            return await call_next(request)
         if settings.require_api_key:
             key = request.headers.get("X-API-Key")
             if not key or key != settings.api_key:

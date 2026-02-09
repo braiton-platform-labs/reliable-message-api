@@ -56,7 +56,52 @@ def metrics() -> PlainTextResponse:
 
 @app.get("/stats")
 def stats_endpoint() -> dict[str, Any]:
-    return {"counters": stats.counters}
+    # Lightweight JSON stats for quick inspection (best-effort; may be partial if DB is down).
+    counters = stats.snapshot()
+
+    # Stable, user-friendly structure derived from the in-memory counters.
+    messages = {
+        "created": counters.get("messages.created", 0),
+        "duplicate": counters.get("messages.duplicate", 0),
+        "invalid": counters.get("messages.invalid", 0),
+    }
+    requests_by_method: dict[str, int] = {}
+    requests_by_path: dict[str, int] = {}
+    responses_by_status: dict[str, int] = {}
+    for k, v in counters.items():
+        if k.startswith("requests.by_method."):
+            requests_by_method[k.removeprefix("requests.by_method.")] = v
+        elif k.startswith("requests.by_path."):
+            requests_by_path[k.removeprefix("requests.by_path.")] = v
+        elif k.startswith("responses.by_status."):
+            responses_by_status[k.removeprefix("responses.by_status.")] = v
+
+    db_stats: dict[str, Any] = {}
+    try:
+        with engine.connect() as connection:
+            messages_stored = connection.execute(text("SELECT COUNT(*) FROM messages")).scalar_one()
+            idempotency_keys_stored = connection.execute(
+                text("SELECT COUNT(*) FROM idempotency_keys")
+            ).scalar_one()
+        db_stats = {
+            "messages_stored": int(messages_stored),
+            "idempotency_keys_stored": int(idempotency_keys_stored),
+        }
+    except SQLAlchemyError as exc:
+        logging.getLogger(__name__).warning("stats db query failed", extra={"error": str(exc)})
+        db_stats = {"error": "db_unavailable"}
+
+    return {
+        "messages": messages,
+        "requests": {
+            "total": counters.get("requests.total", 0),
+            "by_method": requests_by_method,
+            "by_path": requests_by_path,
+            "responses_by_status": responses_by_status,
+        },
+        "db": db_stats,
+        "counters": counters,
+    }
 
 
 @app.exception_handler(ValidationError)
@@ -70,6 +115,7 @@ async def request_validation_handler(
 ) -> JSONResponse:
     details = [err.get("msg", "Invalid request") for err in exc.errors()]
     return error_payload(request, 400, "invalid_request", "Request validation failed", details)
+
 
 @app.exception_handler(NotFoundError)
 async def not_found_exception_handler(request: Request, exc: NotFoundError) -> JSONResponse:

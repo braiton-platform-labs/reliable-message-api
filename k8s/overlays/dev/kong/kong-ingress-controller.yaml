@@ -13,15 +13,38 @@ rules:
   - apiGroups: [""]
     resources: ["services", "endpoints", "pods", "secrets", "configmaps"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "ingressclasses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["configuration.konghq.com"]
-    resources: ["kongclusterplugins", "kongplugins", "kongconsumers", "kongingresses"]
+    resources:
+      - kongclusterplugins
+      - kongplugins
+      - kongconsumers
+      - kongingresses
+      - tcpingresses
+      - udpingresses
+      - ingressclassparameters
+      - kongupstreampolicies
+      - kongconsumergroups
+      - kongcustomentities
+      - kongvaults
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -53,6 +76,23 @@ spec:
         app: kong-ingress
     spec:
       serviceAccountName: kong-ingress
+      initContainers:
+        - name: wait-kong-admin
+          image: curlimages/curl:8.6.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -lc
+            - |
+              set -eu
+              for i in $(seq 1 180); do
+                if curl -sS --max-time 2 http://kong-admin.dev.svc.cluster.local:8001/status >/dev/null 2>&1; then
+                  exit 0
+                fi
+                sleep 1
+              done
+              echo "timeout waiting for kong admin"
+              exit 1
       containers:
         - name: controller
           image: kong/kubernetes-ingress-controller:3.3
@@ -61,6 +101,15 @@ spec:
             - --publish-service=dev/kong-proxy
             - --log-level=info
           env:
+            # Required by the controller for self-identification/leader-election related logs and behavior.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: CONTROLLER_KONG_ADMIN_URL
               value: http://kong-admin.dev.svc.cluster.local:8001
             - name: CONTROLLER_KONG_ADMIN_TOKEN

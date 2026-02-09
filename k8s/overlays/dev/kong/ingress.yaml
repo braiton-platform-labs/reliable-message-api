@@ -5,7 +5,7 @@ metadata:
   labels:
     app: kong
   annotations:
-    konghq.com/protocols: "http"
+    konghq.com/protocols: "http,https"
     konghq.com/strip-path: "true"
     konghq.com/plugins: "kong-admin-ip-whitelist"
 spec:
@@ -33,7 +33,7 @@ metadata:
   labels:
     app: api
   annotations:
-    konghq.com/protocols: "http"
+    konghq.com/protocols: "http,https"
     konghq.com/strip-path: "false"
 spec:
   ingressClassName: kong
@@ -49,6 +49,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: kong-proxy
+                name: api
                 port:
                   number: 80

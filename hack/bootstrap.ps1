@@ -12,7 +12,7 @@ New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
 $SummaryOrder = @(
   "apt-system","network-tools","curl","wget","unzip","git","make","python3","openssl",
-  "docker","mkcert","kubectl","kind","kube-context","jq","kustomize","kubeconform","awscli"
+  "docker","mkcert","kubectl","kind","kube-context","jq","kustomize","kubeconform"
 )
 $Summary = [ordered]@{}
 $SummaryOrder | ForEach-Object { $Summary[$_] = "PENDING" }
@@ -55,8 +55,6 @@ Load-Versions $VersionsFile
 $kubectlVersion = $Env:KUBECTL_VERSION
 $kindVersion = $Env:KIND_VERSION
 $jqVersion = $Env:JQ_VERSION
-$awscliVersion = $Env:AWSCLI_VERSION
-$awscliWindowsMsiSha256 = $Env:AWSCLI_WINDOWS_MSI_SHA256
 $gitVersion = $Env:GIT_VERSION
 $makeVersion = $Env:MAKE_VERSION
 $pythonVersion = $Env:PYTHON_VERSION
@@ -79,8 +77,6 @@ $bootstrapAutoKubeContext = $Env:BOOTSTRAP_AUTO_KUBECONTEXT
 if (-not $kubectlVersion) { $kubectlVersion = "v1.35.0" }
 if (-not $kindVersion) { $kindVersion = "v0.30.0" }
 if (-not $jqVersion) { $jqVersion = "1.8.1" }
-if (-not $awscliVersion) { $awscliVersion = "2.33.17" }
-if (-not $awscliWindowsMsiSha256) { $awscliWindowsMsiSha256 = "" }
 if (-not $gitVersion) { $gitVersion = "2.34.0" }
 if (-not $makeVersion) { $makeVersion = "4.3" }
 if (-not $pythonVersion) { $pythonVersion = "3.8.0" }
@@ -142,7 +138,7 @@ if ($InstallBinDir -ne $BinDir -and $env:PATH -notlike "*$BinDir*") {
   $env:PATH = "$BinDir;$env:PATH"
 }
 
-Write-Host "Target versions (security/compat): kubectl=$kubectlVersion kind=$kindVersion jq=$jqVersion awscli=$awscliVersion mkcert=$mkcertVersion kustomize=$kustomizeVersion kubeconform=$kubeconformVersion docker>=$dockerEngineMinVersion git>=$gitVersion make>=$makeVersion python>=$pythonVersion openssl>=$opensslMinVersion curl>=$curlMinVersion wget>=$wgetMinVersion unzip>=$unzipMinVersion"
+Write-Host "Target versions (security/compat): kubectl=$kubectlVersion kind=$kindVersion jq=$jqVersion mkcert=$mkcertVersion kustomize=$kustomizeVersion kubeconform=$kubeconformVersion docker>=$dockerEngineMinVersion git>=$gitVersion make>=$makeVersion python>=$pythonVersion openssl>=$opensslMinVersion curl>=$curlMinVersion wget>=$wgetMinVersion unzip>=$unzipMinVersion"
 Write-Host "SHA256 verification enabled for kubectl, kind, jq, mkcert, kustomize, kubeconform downloads."
 Write-Host "Set BOOTSTRAP_AUTO_CONFIRM=1 to auto-accept reinstalls."
 Write-Host "global binary mode: BOOTSTRAP_ENFORCE_GLOBAL_BIN=$bootstrapEnforceGlobalBin, install dir=$InstallBinDir"
@@ -555,49 +551,6 @@ function Ensure-WingetPackage($id, $name, $desiredVersion, $versionPattern, $cmd
   Write-Host "$name installed: $current"
 }
 
-function Install-AwsCliMsi($version, $sha256) {
-  $msi = Join-Path $env:TEMP "AWSCLIV2.msi"
-  $url = "https://awscli.amazonaws.com/AWSCLIV2.msi"
-  Write-Host "installing AWS CLI $version from MSI"
-  Invoke-Download $url $msi
-  $actual = (Get-FileHash $msi -Algorithm SHA256).Hash.ToLower()
-  if ($sha256) {
-    if ($actual -ne $sha256.ToLower()) {
-      Write-Host "AWS CLI MSI checksum mismatch" -ForegroundColor Red
-      Write-Host "expected: $sha256"
-      Write-Host "actual:   $actual"
-      throw "bootstrap step failed"
-    }
-  } else {
-    Write-Host "AWSCLI_WINDOWS_MSI_SHA256 not set; using computed hash and updating tool-versions.env" -ForegroundColor Yellow
-    Update-ToolVersions $VersionsFile "AWSCLI_WINDOWS_MSI_SHA256" $actual
-    $sha256 = $actual
-  }
-  Start-Process "msiexec.exe" -ArgumentList "/i `"$msi`" /qn" -Wait
-}
-
-function Ensure-AwsCli($version, $sha256) {
-  $current = Get-CommandVersion "aws" 'aws-cli/(\d+\.\d+\.\d+)'
-  if ($current) {
-    Write-Host "awscli detected: $current (desired: $version)"
-  } else {
-    Write-Host "awscli detected: not found (desired: $version)"
-  }
-  if ($current -eq $version) {
-    Write-Host "awscli $current already installed"
-    return
-  }
-  if ($current) { Should-Reinstall "awscli" $current $version | Out-Null }
-  Install-AwsCliMsi $version $sha256
-  $WingetUsed["awscli"] = "MSI"
-  $current = Get-CommandVersion "aws" 'aws-cli/(\d+\.\d+\.\d+)'
-  if ($current -ne $version) {
-    Write-Host "Error: awscli version is $current, expected $version" -ForegroundColor Red
-    throw "bootstrap step failed"
-  }
-  Write-Host "awscli installed: $current"
-}
-
 function Ensure-Git($version) {
   $current = Get-GitVersion
   if ($current) { Write-Host "git detected: $current (desired: $version)" } else { Write-Host "git detected: not found (desired: $version)" }
@@ -867,7 +820,6 @@ try {
   Run-Step "kind" { Ensure-Kind $kindVersion }
   Run-SoftStep "kube-context" { Ensure-KubeContext $bootstrapExpectedKubeContext $bootstrapAutoKubeContext }
   Run-Step "jq" { Ensure-Jq $jqVersion }
-  Run-Step "awscli" { Ensure-AwsCli $awscliVersion $awscliWindowsMsiSha256 }
   Run-Step "kustomize" { Ensure-Kustomize $kustomizeVersion }
   Run-Step "kubeconform" { Ensure-Kubeconform $kubeconformVersion }
 
@@ -946,7 +898,6 @@ function Start-DockerDesktop {
   Show-Version "kube-context" (Get-CurrentKubeContext)
   Show-Version "kube-context expected" $bootstrapExpectedKubeContext
   Show-Version "jq" (Get-CommandVersion 'jq' 'jq-(\d+\.\d+\.\d+)')
-  Show-Version "awscli" (Get-CommandVersion 'aws' 'aws-cli/(\d+\.\d+\.\d+)')
   Show-Version "mkcert" (Get-MkcertVersion)
   Show-Version "kustomize" (Get-KustomizeVersion)
   Show-Version "kubeconform" (Get-KubeconformVersion)
@@ -961,7 +912,7 @@ function Start-DockerDesktop {
 
   if (Get-Command Get-Command -ErrorAction SilentlyContinue) {
     Write-Host "refreshing command cache..."
-    try { Get-Command -Name kubectl,kind,jq,aws,mkcert,kustomize,kubeconform -ErrorAction SilentlyContinue | Out-Null } catch {}
+    try { Get-Command -Name kubectl,kind,jq,mkcert,kustomize,kubeconform -ErrorAction SilentlyContinue | Out-Null } catch {}
   }
   Write-Host "if your current terminal still does not find a command, open a new PowerShell session."
 

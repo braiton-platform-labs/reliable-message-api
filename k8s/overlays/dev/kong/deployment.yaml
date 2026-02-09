@@ -58,13 +58,15 @@ spec:
                 secretKeyRef:
                   name: app-secrets
                   key: KONG_ADMIN_GUI_SESSION_CONF
+            - name: KONG_NGINX_WORKER_PROCESSES
+              value: "1"
           resources:
             requests:
-              cpu: "50m"
-              memory: "64Mi"
+              cpu: "100m"
+              memory: "128Mi"
             limits:
               cpu: "200m"
-              memory: "128Mi"
+              memory: "256Mi"
       containers:
         - name: kong
           image: kong:3.6.1
@@ -140,6 +142,8 @@ spec:
               value: "/dev/stderr"
             - name: KONG_LOG_LEVEL
               value: "notice"
+            - name: KONG_NGINX_WORKER_PROCESSES
+              value: "1"
           volumeMounts:
             - name: kong-poststart
               mountPath: /kong/poststart
@@ -155,11 +159,11 @@ spec:
             periodSeconds: 10
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
+              cpu: "200m"
               memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
@@ -168,7 +172,14 @@ spec:
           lifecycle:
             postStart:
               exec:
-                command: ["sh", "/kong/poststart/poststart-bootstrap.sh"]
+                # Run bootstrap asynchronously so it never delays pod readiness.
+                # The script itself has retry/timeout logic and is best-effort for local dev.
+                command:
+                  - sh
+                  - -lc
+                  - |
+                    sh /kong/poststart/poststart-bootstrap.sh >/proc/1/fd/1 2>/proc/1/fd/2 &
+                    exit 0
       volumes:
         - name: kong-poststart
           configMap:

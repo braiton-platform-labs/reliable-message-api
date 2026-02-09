@@ -15,5 +15,3 @@ htmlcov/
 bin/
 hack/certs/
 k8s/overlays/dev/kong/ip-whitelist.yaml
-hack/aws/access-key
-hack/aws/secret-access-key

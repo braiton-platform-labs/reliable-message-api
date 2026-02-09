@@ -21,7 +21,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: api
-          image: REPLACE_ECR_IMAGE
+          image: reliable-message-api:dev
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -57,7 +57,7 @@ spec:
               drop: ["ALL"]
       initContainers:
         - name: migrate
-          image: REPLACE_ECR_IMAGE
+          image: reliable-message-api:dev
           imagePullPolicy: IfNotPresent
           command: ["python", "scripts/run_migrations.py"]
           envFrom:
@@ -75,5 +75,3 @@ spec:
             limits:
               cpu: "200m"
               memory: "128Mi"
-      imagePullSecrets:
-        - name: ecr-pull

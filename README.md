@@ -3,16 +3,38 @@
 Production-minded Message API built with FastAPI + PostgreSQL, featuring strong validation, dedupe, idempotency, and Datadog-first observability.
 
 **Local dev with kind (recommended)**
-Prereqs: `docker`, `kubectl`, `kind`, `aws`, `jq`.
-Required env: `AWS_PROFILE` and `AWS_REGION` (default `us-east-1`).
-This project uses AWS Secrets Manager + External Secrets (no `.env` support).
+Prereqs: `docker`, `kubectl`, `kind`, `jq`.
+Windows 11: run the dev commands from Git Bash (recommended) or WSL2. The `Makefile` uses a POSIX shell (it won't work in plain PowerShell `cmd` semantics).
+Secrets: local `.env` (gitignored). Generate one with: `make dev-env-init`.
 
-1. `AWS_PROFILE=your-profile AWS_REGION=us-east-1 make dev`
+1. `make dev`
 
-API will be available at `http://localhost:8080`.
+`make dev` finishes and leaves a managed background port-forward running.
+- Stop it: `make dev-port-stop`
+- Foreground mode: `make dev-fg`
+By default it restarts only the API (faster dev loop). If you changed Kong settings (`KONG_*`) run: `make dev-rollout-all`.
+
+API will be available at `http://localhost:8080` (HTTP) and `https://api.local.dev:8443` (HTTPS).
+
+DNS local (recommended, optional):
+`make dev-hosts-apply`
+This adds `api.local.dev` and `kong.local.dev` to `/etc/hosts` (idempotent, with a backup).
+Remove later with: `make dev-hosts-remove`.
+
+Windows 11 DNS:
+`make dev-hosts-apply-win` (run as Administrator) updates the Windows hosts file.
+Remove with: `make dev-hosts-remove-win`.
+If you run `make dev` inside WSL2 but use Postman/Browser on Windows, you still need the Windows hosts file entry.
+
+Postman (business rules):
+- Import `postman/reliable-message-api.business-rules.postman_collection.json`
+- Import `postman/reliable-message-api.local.postman_environment.json`
+- If `REQUIRE_API_KEY=true`, set `apiKey` in the environment to match your `.env` / `dev/app-secrets`.
+- If HTTPS fails in Postman, disable SSL verification (Settings -> General) or trust the mkcert root CA.
 
 Optional Datadog agent overlay:
 `make dev-dd`
+Requires `DD_API_KEY` (and usually `DD_AGENT_HOST=datadog-agent`, `DD_TRACE_AGENT_URL=http://datadog-agent:8126`) in `.env`.
 
 Optional tool check:
 `./hack/doctor.sh`
@@ -26,8 +48,7 @@ TLS local (mkcert):
 RBAC user per dev:
 `make dev-kong-user`
 This generates a user based on your machine name and a secure password, saved locally in `.git/dev-kong-user`.
-It also appends the user to `KONG_RBAC_USERS` in AWS Secrets Manager automatically.
-Then re-run: `make dev-secrets-apply`
+It also appends the user to `KONG_RBAC_USERS` in `.env` and re-applies `dev/app-secrets`.
 
 Remove user:
 `USER_NAME=devname make dev-kong-user-remove`
@@ -50,6 +71,15 @@ Admin whitelist:
 Tip: when using `make dev-port`, include `Host: api.local.dev` to match the Ingress route:
 `curl -H 'Host: api.local.dev' http://localhost:8080/health`
 
+## Kong/KIC validation (dev)
+
+```bash
+kubectl get crd | grep konghq.com
+kubectl auth can-i list customresourcedefinitions.apiextensions.k8s.io \
+  --as=system:serviceaccount:dev:kong-ingress
+kubectl -n dev logs deploy/kong-ingress --tail=200
+```
+
 ## Bootstrap de dependências locais
 Para instalar versões fixas (máximo de estabilidade possível):
 
@@ -65,46 +95,21 @@ Versões ficam em `hack/tool-versions.env` e podem ser ajustadas conforme necess
 - `k8s/base`: API Deployment + Service.
 - `k8s/overlays/dev`: dev namespace + Postgres StatefulSet + PVC.
 - `k8s/overlays/dev-dd`: same as dev, plus Datadog agent Deployment/Service.
-- `k8s/overlays/dev/external-secrets`: SecretStore + ExternalSecret for AWS Secrets Manager.
-- `k8s/overlays/dev/external-secrets/install`: ESO CRDs + controller (pinned version).
 Kong (gateway) for local dev is included in the dev overlays and proxies requests to the API.
 Kong runs with Postgres (same instance as the app, using the `kong` database) to enable plugins and UI.
 
-## Local dev secrets via AWS Secrets Manager + ESO
-Prereqs:
-- AWS CLI configured (`aws configure` or `AWS_PROFILE` set)
-- `AWS_REGION` set (default `us-east-1`)
-- IAM policy with least privilege:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:GetSecretValue"
-      ],
-      "Resource": "arn:aws:secretsmanager:us-east-1:*:secret:braiton-platform-labs/dev/reliable-message-api*"
-    }
-  ]
-}
-```
+## Local dev secrets via `.env`
+This repo uses a local `.env` file (gitignored) to populate the Kubernetes Secret `dev/app-secrets`.
 
 Steps:
-1. Create or update the secret manually in AWS Secrets Manager:
-   - Secret name: `braiton-platform-labs/dev/reliable-message-api`
-   - Secret type: plain text JSON
-   - Required keys: `DATABASE_URL`, `REQUIRE_API_KEY`, `API_KEY`, `METRICS_ENABLED`, `STATS_ENABLED`, `IDEMPOTENCY_TTL_HOURS`, `DD_SERVICE`, `DD_ENV`, `DD_VERSION`, `DD_TRACE_AGENT_URL`, `DD_AGENT_HOST`, `POSTGRES_PASSWORD`, `KONG_PG_PASSWORD`, `KONG_ADMIN_GUI_USER`, `KONG_ADMIN_GUI_PASSWORD`, `KONG_ADMIN_TOKEN`, `KONG_RBAC_USERS`.
-2. Install External Secrets Operator (CRDs + controller, pinned):
-   `kubectl apply --server-side -k k8s/overlays/dev/external-secrets/install`
-3. Ensure your AWS profile is logged in (SSO/AssumeRole):
-   - Example: `aws sso login --profile $AWS_PROFILE`
-4. Apply SecretStore + ExternalSecret (also creates/updates `dev/awssm-secret` from `AWS_PROFILE` automatically):
+1. Generate a `.env` if you don't have one yet:
+   `make dev-env-init`
+   (`.env.example` is available as a reference.)
+2. Apply/update `dev/app-secrets` from `.env`:
    `make dev-secrets-apply`
-5. Validate:
-   `kubectl -n dev get secret app-secrets`
+
+Required keys (dev overlay):
+`DATABASE_URL`, `REQUIRE_API_KEY`, `API_KEY`, `METRICS_ENABLED`, `STATS_ENABLED`, `IDEMPOTENCY_TTL_HOURS`, `DD_SERVICE`, `DD_ENV`, `DD_VERSION`, `DD_AGENT_HOST`, `DD_TRACE_AGENT_URL`, `DD_API_KEY` (can be empty unless using `dev-dd`), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `KONG_PG_PASSWORD`, `KONG_ADMIN_GUI_USER`, `KONG_ADMIN_GUI_PASSWORD`, `KONG_ADMIN_TOKEN`, `KONG_ADMIN_GUI_SESSION_CONF`, `KONG_RBAC_USERS`.
 
 ## Automatic migrations
 Migrations run before the app container starts using an initContainer that executes `scripts/run_migrations.py`.
@@ -118,22 +123,12 @@ This keeps the `idempotency_keys` table bounded via `IDEMPOTENCY_TTL_HOURS`.
 Run manually:
 `kubectl -n dev create job --from=cronjob/idempotency-cleanup manual-cleanup`
 
-## ECR Image Flow
-The API Deployment pulls from ECR and uses the `ecr-pull` imagePullSecret.
+## Local image flow
+The API image is built locally and loaded into the kind nodes.
 
-- Ensure repo/login/push:
-  `make dev-ecr-push`
-- Refresh imagePullSecret (token expires):
-  `make dev-ecr-secret-refresh`
-
-The `make dev` target runs both of these steps automatically.
-
-`dev-apply` and `dev-dd` also run `dev-ecr-secret-ensure-fresh` to refresh the token if it's older than 10 hours.
-
-Image generation prompt:
-- When a new commit is detected, `make dev-ecr-push` asks whether to build/push a new image.
-- The last pushed commit is stored locally in `.git/dev-last-image` (not committed).
-- To force a push without prompt: `ECR_FORCE_PUSH=true make dev-ecr-push` (CI can set `CI=true`).
+- Build: `make dev-build`
+- Load into kind: `make dev-kind-load`
+- Apply manifests: `make dev-apply` (requires `make dev-secrets-apply` first)
 
 ## Endpoints
 
@@ -147,7 +142,7 @@ Image generation prompt:
 | GET | /health | Liveness |
 | GET | /ready | Readiness (DB check) |
 | GET | /metrics | Prometheus metrics |
-| GET | /stats | JSON counters |
+| GET | /stats | JSON stats (requests/messages + DB counts) |
 
 ## Validation Rules
 - Message length: min 5, max 200
@@ -167,7 +162,9 @@ If a key is reused, the original response is replayed. If reused with a differen
 TTL cleanup is performed by `scripts/cleanup_idempotency.py` (e.g., daily CronJob in Kubernetes).
 
 ## Auth (Optional)
-If `REQUIRE_API_KEY=true`, the API requires header `X-API-Key` matching `API_KEY`. Otherwise, open access.
+If `REQUIRE_API_KEY=true`, the API requires header `X-API-Key` matching `API_KEY` for all endpoints except `/health` and `/ready`. Otherwise, open access.
+
+Note: `/health` and `/ready` are always unauthenticated to support Kubernetes probes.
 
 ## Observability
 - Datadog APM auto-instrumentation via `ddtrace.auto`
@@ -181,6 +178,21 @@ Custom metrics:
 - `messages.invalid`
 - `http.requests.by_route`
 - `request.latency`
+
+## Stats endpoint (JSON)
+Quick, human-friendly stats at `/stats` (best-effort).
+
+Example:
+
+```bash
+curl -s -H 'Host: api.local.dev' http://localhost:8080/stats | jq .
+```
+
+Returns (example):
+- `db.messages_stored`: total stored messages
+- `db.idempotency_keys_stored`: total stored idempotency keys
+- `requests.total`, `requests.by_method`, `requests.by_path`, `requests.responses_by_status`
+- `messages.created`, `messages.duplicate`, `messages.invalid`
 
 ## Local Examples
 

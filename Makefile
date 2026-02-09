@@ -1,15 +1,15 @@
-.PHONY: help test lint format kind-up kind-down dev-context dev-eso-install dev-build dev-apply dev-dd dev-port dev-reset dev-verify \
-	dev-secrets-apply dev dev-status dev-logs dev-psql dev-port-kong-admin dev-tls dev-kong-whitelist dev-kong-user dev-kong-user-remove \
-	ecr-repo-ensure dev-ecr-login dev-ecr-push dev-ecr-secret-refresh \
+.PHONY: help test lint format kind-up kind-down dev-context dev-env-init dev-secrets-apply dev-build dev-kind-load dev-apply dev-dd \
+	dev-up dev-fg dev-rollout dev-rollout-all dev-port dev-port-bg dev-port-stop dev-port-status dev-port-logs dev-reset dev-verify dev dev-status \
+	dev-logs dev-psql dev-port-kong-admin dev-tls dev-kong-whitelist dev-kong-user dev-kong-user-remove dev-kong-crds-install \
+	dev-hosts-status dev-hosts-apply dev-hosts-remove dev-hosts-status-win dev-hosts-apply-win dev-hosts-remove-win \
 	k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin
 
 TOOL_VERSIONS_FILE ?= hack/tool-versions.env
 -include $(TOOL_VERSIONS_FILE)
 export KUSTOMIZE_VERSION KUBECONFORM_VERSION
 
-AWS_REGION ?= us-east-1
-AWS_PROFILE ?= default
-AWS_SECRET_NAME ?= braiton-platform-labs/dev/reliable-message-api
+ENV_FILE ?= .env
+KONG_CRDS_REF ?= v3.3
 KIND_CLUSTER_NAME ?= bpl-dev
 EXPECTED_KUBE_CONTEXT ?= kind-$(KIND_CLUSTER_NAME)
 KIND_NODE_IMAGE ?= kindest/node:v1.34.3
@@ -19,21 +19,45 @@ KIND_NODE_IMAGE ?= kindest/node:v1.34.3
 # Default: 1 worker (more stable on dev laptops)
 KIND_WORKERS ?= 1
 
-ECR_REPO_NAME ?= reliable-message-api
-GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo local)
-AWS_ACCOUNT_ID = $(shell aws sts get-caller-identity --query Account --output text --profile $(AWS_PROFILE) --region $(AWS_REGION))
-ECR_REGISTRY = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
-ECR_REPO_URI = $(ECR_REGISTRY)/$(ECR_REPO_NAME)
+IMAGE ?= reliable-message-api:dev
+
+DEV_HTTP_PORT ?= 8080
+DEV_HTTPS_PORT ?= 8443
+DEV_PORT_FORWARD_ADDR ?= 127.0.0.1
+DEV_PORT_FORWARD_DIR ?= /tmp/reliable-message-api-dev-$(KIND_CLUSTER_NAME)
+DEV_WAIT_TIMEOUT ?= 300s
 
 BIN_DIR ?= bin
-KUSTOMIZE_BIN ?= $(BIN_DIR)/kustomize
-KUBECONFORM_BIN ?= $(BIN_DIR)/kubeconform
+
+# Cross-platform helpers (Windows uses .exe).
+EXE ?=
+ifeq ($(OS),Windows_NT)
+UNAME_S := Windows_NT
+EXE := .exe
+else
+UNAME_S := $(shell uname -s 2>/dev/null || echo unknown)
+endif
+ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
+EXE := .exe
+endif
+
+PYTHON ?= python3
+ifeq ($(EXE),.exe)
+PYTHON := python
+endif
+
+KUSTOMIZE_BIN ?= $(BIN_DIR)/kustomize$(EXE)
+KUBECONFORM_BIN ?= $(BIN_DIR)/kubeconform$(EXE)
 
 help:
 	@echo "Targets:"
-	@echo "  make dev                Full local dev flow (kind + ESO + ECR + apply + port)"
+	@echo "  make dev                Full local dev flow (apply + restart + port-forward in background)"
+	@echo "  make dev-fg             Same as dev, but keeps port-forward in foreground (Ctrl+C to stop)"
+	@echo "  make dev-up             Provision/apply/restart/wait (no port-forward)"
+	@echo "  make dev-port-bg        Start/restart port-forward in background and exit"
+	@echo "  make dev-port-stop      Stop background port-forward (if running)"
 	@echo "  make dev-dd             Apply dev-dd overlay (includes Datadog agent)"
-	@echo "  make dev-secrets-apply   Apply SecretStore/ExternalSecret + awssm-secret"
+	@echo "  make dev-secrets-apply   Apply dev/app-secrets from $(ENV_FILE)"
 	@echo "  make k8s-validate        Validate k8s manifests with kubeconform"
 	@echo "  make dev-clean           Clean dev namespace, kind cluster, and build cache"
 
@@ -197,197 +221,234 @@ dev-context:
 			kubectl patch storageclass local-path -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class":"true"}}}' >/dev/null; \
 		fi
 
+dev-env-init:
+	@$(PYTHON) scripts/dev_env.py init --env-file "$(ENV_FILE)"
+
 dev-build:
-	docker build -f docker/Dockerfile -t reliable-message-api:dev --label project=reliable-message-api .
+	docker build -f docker/Dockerfile -t $(IMAGE) --label project=reliable-message-api .
 
+dev-kind-load: dev-context dev-build
+	kind load docker-image $(IMAGE) --name $(KIND_CLUSTER_NAME)
 
-dev-apply: dev-context kustomize-bin dev-ecr-secret-ensure-fresh
-	@image_tag=$$(cat .git/dev-last-image 2>/dev/null || echo $(GIT_SHA)); \
-	$(KUSTOMIZE_BIN) build k8s/overlays/dev | sed "s|REPLACE_ECR_IMAGE|$(ECR_REPO_URI):dev-$$image_tag|" | kubectl apply -f -
+dev-apply: dev-context kustomize-bin dev-kind-load dev-kong-crds-install
+	$(KUSTOMIZE_BIN) build k8s/overlays/dev | kubectl apply -f -
 
-dev-dd: dev-context kustomize-bin dev-ecr-secret-ensure-fresh
-	@image_tag=$$(cat .git/dev-last-image 2>/dev/null || echo $(GIT_SHA)); \
-	$(KUSTOMIZE_BIN) build k8s/overlays/dev-dd | sed "s|REPLACE_ECR_IMAGE|$(ECR_REPO_URI):dev-$$image_tag|" | kubectl apply -f -
+dev-dd: dev-context kustomize-bin dev-kind-load dev-kong-crds-install
+	$(KUSTOMIZE_BIN) build k8s/overlays/dev-dd | kubectl apply -f -
+
+dev-rollout: dev-context
+	@set -e; \
+	echo "==> Waiting for Postgres to be Ready..."; \
+	kubectl -n dev wait --for=condition=Ready pod -l app=postgres --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Waiting for Kong rollout..."; \
+	kubectl -n dev rollout status deployment/kong --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Waiting for Kong Ingress Controller rollout..."; \
+	kubectl -n dev rollout status deployment/kong-ingress --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Restarting API (to pick up the latest local image/secrets)..."; \
+	kubectl -n dev rollout restart deployment/api >/dev/null; \
+	echo "==> Waiting for API rollout..."; \
+	kubectl -n dev rollout status deployment/api --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Rollouts OK."
+
+dev-rollout-all: dev-context
+	@set -e; \
+	echo "==> Waiting for Postgres to be Ready..."; \
+	kubectl -n dev wait --for=condition=Ready pod -l app=postgres --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Restarting Kong + KIC + API (full refresh)..."; \
+	kubectl -n dev rollout restart deployment/kong deployment/kong-ingress deployment/api >/dev/null; \
+	echo "==> Waiting for Kong rollout..."; \
+	kubectl -n dev rollout status deployment/kong --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Waiting for Kong Ingress Controller rollout..."; \
+	kubectl -n dev rollout status deployment/kong-ingress --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Waiting for API rollout..."; \
+	kubectl -n dev rollout status deployment/api --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Rollouts OK."
 
 dev-port: dev-context
-	kubectl -n dev port-forward svc/kong-proxy 8080:80
+	@echo "==> Waiting for Kong proxy to be ready..."
+	@kubectl -n dev wait --for=condition=Ready pod -l app=kong --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null || { \
+		echo "ERROR: kong pod not Ready; current status:"; \
+		kubectl -n dev get pods -o wide || true; \
+		exit 1; \
+	}
+	@echo "==> Port-forward ativo em http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT) e https://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTPS_PORT) (Ctrl+C para parar)."
+	@echo "==> Teste HTTP (outro terminal): curl -H 'Host: api.local.dev' http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT)/health"
+	@echo "==> Teste HTTPS: curl -sk --resolve api.local.dev:$(DEV_HTTPS_PORT):$(DEV_PORT_FORWARD_ADDR) -H 'Host: api.local.dev' https://api.local.dev:$(DEV_HTTPS_PORT)/health"
+	kubectl -n dev port-forward --address $(DEV_PORT_FORWARD_ADDR) svc/kong-proxy $(DEV_HTTP_PORT):80 $(DEV_HTTPS_PORT):443
+
+dev-port-bg: dev-context
+	@set -e; \
+	mkdir -p "$(DEV_PORT_FORWARD_DIR)"; \
+	pid="$(DEV_PORT_FORWARD_DIR)/kong-proxy.pid"; \
+	log="$(DEV_PORT_FORWARD_DIR)/kong-proxy.log"; \
+	if [ -f "$$pid" ] && kill -0 "$$(cat "$$pid" 2>/dev/null)" 2>/dev/null; then \
+		echo "==> Stopping existing kong-proxy port-forward (pid=$$(cat "$$pid"))..."; \
+		kill "$$(cat "$$pid")" >/dev/null 2>&1 || true; \
+		sleep 1; \
+	fi; \
+	rm -f "$$pid"; \
+	echo "==> Waiting for Kong proxy to be ready..."; \
+	kubectl -n dev wait --for=condition=Ready pod -l app=kong --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	start_pf() { \
+		args="$$1"; \
+		: >"$$log"; \
+		nohup kubectl -n dev port-forward --address $(DEV_PORT_FORWARD_ADDR) svc/kong-proxy $$args >"$$log" 2>&1 & \
+		echo $$! >"$$pid"; \
+	}; \
+	mode="both"; \
+	echo "==> Starting kong-proxy port-forward in background: $(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT)->80, $(DEV_PORT_FORWARD_ADDR):$(DEV_HTTPS_PORT)->443"; \
+	start_pf "$(DEV_HTTP_PORT):80 $(DEV_HTTPS_PORT):443"; \
+	timeout=60; elapsed=0; \
+	while :; do \
+		code=$$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: api.local.dev' "http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT)/health" 2>/dev/null || echo 000); \
+		if [ "$$code" = "200" ] || [ "$$code" = "403" ]; then \
+			break; \
+		fi; \
+		if ! kill -0 "$$(cat "$$pid" 2>/dev/null)" 2>/dev/null; then \
+			if [ "$$mode" = "both" ] && grep -qi "address already in use" "$$log" && grep -q ":$(DEV_HTTPS_PORT)" "$$log"; then \
+				echo "WARN: HTTPS port $(DEV_HTTPS_PORT) is in use; starting HTTP-only port-forward..."; \
+				mode="http-only"; \
+				start_pf "$(DEV_HTTP_PORT):80"; \
+				elapsed=0; \
+				continue; \
+			fi; \
+			echo "ERROR: port-forward exited early. Log (last 50 lines):"; \
+			tail -n 50 "$$log" || true; \
+			exit 1; \
+		fi; \
+		if [ $$elapsed -ge $$timeout ]; then \
+			echo "ERROR: timeout waiting for port-forward. Log (last 50 lines):"; \
+			tail -n 50 "$$log" || true; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+		elapsed=$$((elapsed+1)); \
+	done; \
+	echo "==> Port-forward OK (pid=$$(cat "$$pid"), mode=$$mode)."; \
+	echo "==> HTTP:  http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT)"; \
+	if [ "$$mode" = "both" ]; then \
+		echo "==> HTTPS: https://api.local.dev:$(DEV_HTTPS_PORT) (use --resolve if needed)"; \
+	else \
+		echo "==> HTTPS: (disabled)"; \
+	fi; \
+	echo "==> Stop:  make dev-port-stop"; \
+	echo "==> Logs:  make dev-port-logs"
+
+dev-port-stop:
+	@set -e; \
+	pid="$(DEV_PORT_FORWARD_DIR)/kong-proxy.pid"; \
+	if [ ! -f "$$pid" ]; then \
+		echo "==> No managed port-forward pid file found ($$pid)."; \
+		exit 0; \
+	fi; \
+	if kill -0 "$$(cat "$$pid" 2>/dev/null)" 2>/dev/null; then \
+		echo "==> Stopping kong-proxy port-forward (pid=$$(cat "$$pid"))..."; \
+		kill "$$(cat "$$pid")" >/dev/null 2>&1 || true; \
+		sleep 1; \
+	fi; \
+	rm -f "$$pid"; \
+	echo "==> Port-forward stopped."
+
+dev-port-status:
+	@set -e; \
+	pid="$(DEV_PORT_FORWARD_DIR)/kong-proxy.pid"; \
+	log="$(DEV_PORT_FORWARD_DIR)/kong-proxy.log"; \
+	if [ -f "$$pid" ] && kill -0 "$$(cat "$$pid" 2>/dev/null)" 2>/dev/null; then \
+		echo "==> kong-proxy port-forward running (pid=$$(cat "$$pid"))"; \
+		echo "==> HTTP:  http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT)"; \
+		echo "==> HTTPS: https://api.local.dev:$(DEV_HTTPS_PORT)"; \
+		if [ -f "$$log" ]; then \
+			echo "==> Forwarding:"; \
+			grep -E "Forwarding from" "$$log" | tail -n 5 || true; \
+		fi; \
+		exit 0; \
+	fi; \
+	echo "==> kong-proxy port-forward not running."; \
+	if [ -f "$$log" ]; then \
+		echo "==> Last log lines:"; \
+		tail -n 20 "$$log" || true; \
+	fi
+
+dev-port-logs:
+	@tail -n 200 -f "$(DEV_PORT_FORWARD_DIR)/kong-proxy.log"
 
 dev-port-kong-admin: dev-context
 	kubectl -n dev port-forward svc/kong-admin 8001:8001 8002:8002
 
+dev-hosts-status:
+	@./hack/dev-hosts.sh status
+
+dev-hosts-apply:
+	@./hack/dev-hosts.sh apply
+
+dev-hosts-remove:
+	@./hack/dev-hosts.sh remove
+
+dev-hosts-status-win:
+	@powershell.exe -ExecutionPolicy Bypass -File hack/dev-hosts.ps1 status
+
+dev-hosts-apply-win:
+	@powershell.exe -ExecutionPolicy Bypass -File hack/dev-hosts.ps1 apply
+
+dev-hosts-remove-win:
+	@powershell.exe -ExecutionPolicy Bypass -File hack/dev-hosts.ps1 remove
+
 dev-reset: dev-context
+	-$(MAKE) dev-port-stop >/dev/null 2>&1 || true
 	kubectl delete ns dev --ignore-not-found=true
 	$(MAKE) dev-secrets-apply
 	$(MAKE) dev-apply
 
-dev-eso-install: dev-context
-	@echo "==> Installing External Secrets Operator (CRDs + controller)..."
-	@kubectl apply --server-side -k k8s/overlays/dev/external-secrets/install
-	@echo "==> Waiting for External Secrets Operator to be ready..."
-	@kubectl -n external-secrets rollout status deploy/external-secrets --timeout=180s || { \
-		echo "ERROR: External Secrets Operator did not become ready (namespace=external-secrets)."; \
-		echo "Troubleshooting:"; \
-		echo "  kubectl -n external-secrets get pods -o wide"; \
-		echo "  kubectl -n external-secrets logs deploy/external-secrets --tail=200"; \
-		exit 1; \
-	}
-	@echo "==> Waiting for External Secrets webhook/cert-controller to be ready..."
-	@kubectl -n external-secrets rollout status deploy/external-secrets-webhook --timeout=180s || { \
-		echo "ERROR: External Secrets webhook did not become ready."; \
-		echo "Troubleshooting:"; \
-		echo "  kubectl -n external-secrets get pods -o wide"; \
-		echo "  kubectl -n external-secrets logs deploy/external-secrets-webhook --tail=200"; \
-		exit 1; \
-	}
-	@kubectl -n external-secrets rollout status deploy/external-secrets-cert-controller --timeout=180s || { \
-		echo "ERROR: External Secrets cert-controller did not become ready."; \
-		echo "Troubleshooting:"; \
-		echo "  kubectl -n external-secrets get pods -o wide"; \
-		echo "  kubectl -n external-secrets logs deploy/external-secrets-cert-controller --tail=200"; \
-		exit 1; \
-	}
-	@echo "==> Waiting for External Secrets CRDs to be established..."
-	@crds="externalsecrets.external-secrets.io secretstores.external-secrets.io clustersecretstores.external-secrets.io"; \
-	for crd in $$crds; do \
-		if ! kubectl get crd "$$crd" >/dev/null 2>&1; then \
-			echo "ERROR: CRD $$crd not found (ESO install incomplete)."; \
-			exit 1; \
-		fi; \
-	done; \
-	if ! kubectl wait --for=condition=Established --timeout=180s crd/externalsecrets.external-secrets.io crd/secretstores.external-secrets.io crd/clustersecretstores.external-secrets.io >/dev/null 2>&1; then \
-		echo "ERROR: External Secrets CRDs did not become Established within timeout."; \
-		echo "Troubleshooting:"; \
-		echo "  kubectl get crd externalsecrets.external-secrets.io -o yaml | grep -nE \"conditions|Established\""; \
-		exit 1; \
-	fi; \
-	for i in 1 2 3 4 5 6 7 8 9 10; do \
-		if kubectl get --raw /apis/external-secrets.io/v1 >/dev/null 2>&1; then \
-			exit 0; \
-		fi; \
-		sleep 1; \
-	done; \
-	echo "ERROR: external-secrets.io/v1 not reachable after CRDs Established."; \
-	echo "Troubleshooting:"; \
-	echo "  kubectl get crd externalsecrets.external-secrets.io -o yaml | grep -nE \"conditions|Established\""; \
-	echo "  kubectl -n external-secrets get pods -o wide"; \
-	exit 1
-
-dev-secrets-apply: dev-context dev-eso-install
-	@echo "==> Applying ExternalSecret/SecretStore and AWS auth secret (awssm-secret)..."
-	@if [ -z "$(AWS_PROFILE)" ] || [ "$(AWS_PROFILE)" = "default" ]; then \
-		echo "ERROR: AWS_PROFILE is not set (or is still 'default')."; \
-		echo "Set it to the profile you use to access the target AWS account (e.g. AWS_PROFILE=development)."; \
+dev-secrets-apply: dev-context dev-env-init
+	@echo "==> Applying Kubernetes Secret dev/app-secrets from $(ENV_FILE) (no values printed)..."
+	@if [ ! -f "$(ENV_FILE)" ]; then \
+		echo "ERROR: $(ENV_FILE) not found."; \
+		echo "Create it (or run: make dev-env-init) and re-run."; \
 		exit 1; \
 	fi
-	@if ! command -v aws >/dev/null 2>&1; then \
-		echo "ERROR: aws CLI not found in PATH."; \
-		exit 1; \
-	fi
-	@echo "==> Creating/updating Kubernetes Secret dev/awssm-secret from AWS_PROFILE=$(AWS_PROFILE) (no secret values printed)..."
-	@set -e; \
-	tmp="$$(mktemp -d)"; \
-	trap 'rm -rf "$$tmp"' EXIT; \
-	creds_env="$$(aws configure export-credentials --profile "$(AWS_PROFILE)" --format env-no-export 2>&1)" || { \
-		echo "ERROR: failed to export AWS credentials for AWS_PROFILE=$(AWS_PROFILE)."; \
-		echo "If using AWS SSO, run: aws sso login --profile $(AWS_PROFILE)"; \
-		echo "$$creds_env"; \
-		exit 1; \
-	}; \
-	ak="$$(printf '%s\n' "$$creds_env" | sed -n 's/^AWS_ACCESS_KEY_ID=//p')"; \
-	sk="$$(printf '%s\n' "$$creds_env" | sed -n 's/^AWS_SECRET_ACCESS_KEY=//p')"; \
-	st="$$(printf '%s\n' "$$creds_env" | sed -n 's/^AWS_SESSION_TOKEN=//p')"; \
-	if [ -z "$$ak" ] || [ -z "$$sk" ]; then \
-		echo "ERROR: exported credentials are missing required fields (need AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)."; \
-		exit 1; \
-	fi; \
-	printf '%s' "$$ak" > "$$tmp/access-key"; \
-	printf '%s' "$$sk" > "$$tmp/secret-access-key"; \
-	extra_secret_args=""; \
-	if [ -n "$$st" ]; then \
-		printf '%s' "$$st" > "$$tmp/session-token"; \
-		extra_secret_args="--from-file=session-token=$$tmp/session-token"; \
-	fi; \
-	kubectl apply -f k8s/overlays/dev/external-secrets/namespace-dev.yaml >/dev/null; \
-	kubectl -n dev create secret generic awssm-secret \
-		--from-file=access-key="$$tmp/access-key" \
-		--from-file=secret-access-key="$$tmp/secret-access-key" \
-		$$extra_secret_args \
-		--dry-run=client -o yaml | kubectl apply -f - >/dev/null; \
-	kubectl -n dev annotate secret awssm-secret \
+	@$(PYTHON) scripts/dev_env.py validate --env-file "$(ENV_FILE)" >/dev/null
+	@kubectl apply -f k8s/overlays/dev/namespace.yaml >/dev/null
+	@kubectl -n dev create secret generic app-secrets \
+		--from-env-file="$(ENV_FILE)" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	@kubectl -n dev annotate secret app-secrets \
 		--overwrite \
-		awssm-secret.bpl/refreshedAtEpoch="$$(date +%s)" \
-		awssm-secret.bpl/refreshedAt="$$(date -Is)" >/dev/null 2>&1 || true; \
-	echo "==> Validating AWS Secrets Manager access and secret format (no secret values printed)..."; \
-	if [ -n "$$st" ]; then export AWS_SESSION_TOKEN="$$st"; else unset AWS_SESSION_TOKEN; fi; \
-	err="$$(AWS_ACCESS_KEY_ID="$$ak" AWS_SECRET_ACCESS_KEY="$$sk" AWS_REGION="$(AWS_REGION)" aws secretsmanager describe-secret --secret-id "$(AWS_SECRET_NAME)" 2>&1)" || { \
-		echo "ERROR: cannot access Secrets Manager secret '$(AWS_SECRET_NAME)' in region $(AWS_REGION) using AWS_PROFILE=$(AWS_PROFILE)."; \
-		echo "$$err"; \
-		echo "Troubleshooting:"; \
-		echo "  1) Confirm the secret exists in this region/account."; \
-		echo "  2) Confirm IAM allows secretsmanager:GetSecretValue and secretsmanager:DescribeSecret for this secret."; \
-		exit 1; \
-	}; \
-	AWS_ACCESS_KEY_ID="$$ak" AWS_SECRET_ACCESS_KEY="$$sk" AWS_REGION="$(AWS_REGION)" aws secretsmanager get-secret-value --secret-id "$(AWS_SECRET_NAME)" --query SecretString --output text 2>/dev/null | \
-	python3 -c 'import json,sys; raw=sys.stdin.read().strip(); \
- (raw and raw not in ("None","null")) or (_ for _ in ()).throw(SystemExit("SecretString is empty/null (expected JSON string)")); \
- obj=json.loads(raw); isinstance(obj,dict) or (_ for _ in ()).throw(SystemExit("SecretString JSON must be an object; got %s" % type(obj).__name__)); \
- bad=[k for k,v in obj.items() if not isinstance(v,str)]; (not bad) or (_ for _ in ()).throw(SystemExit("Non-string values found for keys (quote them as strings): "+", ".join(sorted(bad)))); \
- print("OK")'; \
-	true
-	@echo "==> Applying SecretStore/ExternalSecret (may retry while webhook warms up)..."
-	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-		if kubectl apply -k k8s/overlays/dev/external-secrets; then \
-			break; \
-		fi; \
-		echo "retry $$i/10: waiting for external-secrets webhook to accept requests..."; \
-		kubectl -n external-secrets get pods -o wide || true; \
-		sleep 3; \
-		if [ "$$i" = "10" ]; then \
-			echo "ERROR: failed to apply external-secrets resources after retries."; \
-			exit 1; \
-		fi; \
-	done
-	@# If exported credentials include a session token (ASIA... STS creds), patch SecretStore to include it.
-	@creds_env="$$(aws configure export-credentials --profile "$(AWS_PROFILE)" --format env-no-export 2>/dev/null || true)"; \
-	st="$$(printf '%s\n' "$$creds_env" | sed -n 's/^AWS_SESSION_TOKEN=//p')"; \
-	if [ -n "$$st" ]; then \
-		kubectl -n dev patch secretstore aws-secretsmanager --type=merge -p '{"spec":{"provider":{"aws":{"auth":{"secretRef":{"sessionTokenSecretRef":{"name":"awssm-secret","key":"session-token"}}}}}}}' >/dev/null; \
-	else \
-		kubectl -n dev patch secretstore aws-secretsmanager --type=json -p '[{"op":"remove","path":"/spec/provider/aws/auth/secretRef/sessionTokenSecretRef"}]' >/dev/null 2>&1 || true; \
-	fi
-	@echo "==> Waiting for app-secrets to be created by ESO..."
-	@for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60; do \
-		if kubectl -n dev get secret app-secrets >/dev/null 2>&1; then \
-			echo "app-secrets is present."; \
-			exit 0; \
-		fi; \
-		sleep 2; \
-	done; \
-	echo "ERROR: app-secrets was not created after 120s."; \
-	echo "Troubleshooting:"; \
-	echo "  kubectl -n dev get externalsecret -o wide"; \
-	echo "  kubectl -n dev describe externalsecret app-secrets"; \
-	echo "  kubectl -n external-secrets get pods -o wide"; \
-	echo "  kubectl -n external-secrets logs deploy/external-secrets --tail=200"; \
-	exit 1
+		app-secrets.bpl/refreshedAtEpoch="$$(date +%s)" \
+		app-secrets.bpl/refreshedAt="$$(date -Is)" >/dev/null 2>&1 || true
+	@echo "==> app-secrets applied."
 
 dev-tls: dev-context
 	@cert_dir="hack/certs"; \
 	if ! command -v mkcert >/dev/null 2>&1; then \
-		echo "ERROR: mkcert not found (required for local TLS)"; \
-		echo "Install it and re-run. Ubuntu: apt install mkcert; macOS: brew install mkcert; Windows: choco install mkcert"; \
-		exit 1; \
+		echo "WARN: mkcert not found; skipping TLS secret. Install mkcert and run: make dev-tls"; \
+		exit 0; \
 	fi; \
 	mkdir -p "$$cert_dir"; \
 	mkcert -install >/dev/null; \
 	mkcert -cert-file "$$cert_dir/kong-local.crt" -key-file "$$cert_dir/kong-local.key" api.local.dev kong.local.dev >/dev/null; \
-	echo "certs written to $$cert_dir"
+	echo "certs written to $$cert_dir"; \
 	kubectl -n dev create secret tls kong-local-tls \
 		--cert=hack/certs/kong-local.crt \
 		--key=hack/certs/kong-local.key \
 		--dry-run=client -o yaml | kubectl apply -f -
 
-dev-kong-whitelist: dev-context
+dev-kong-crds-install: dev-context
+	@vendor="k8s/vendor/kong-kic-crds.yaml"; \
+	if [ -f "$$vendor" ]; then \
+		echo "==> Installing Kong CRDs from $$vendor..."; \
+		kubectl apply -f "$$vendor"; \
+		kubectl wait --for=condition=Established --timeout=120s -f "$$vendor" >/dev/null; \
+	else \
+		echo "WARN: Kong CRDs vendor file not found ($$vendor); skipping CRD install."; \
+		echo "WARN: dev-kong-whitelist will be skipped until Kong CRDs are installed."; \
+		exit 0; \
+	fi
+
+dev-kong-whitelist: dev-context dev-kong-crds-install
+	@if ! kubectl get crd kongplugins.configuration.konghq.com >/dev/null 2>&1; then \
+		echo "WARN: Kong CRD kongplugins.configuration.konghq.com not installed; skipping dev-kong-whitelist."; \
+		exit 0; \
+	fi
 	@out_file="k8s/overlays/dev/kong/ip-whitelist.yaml"; \
 	mkdir -p "$$(dirname "$$out_file")"; \
 	local_ips() { \
@@ -433,155 +494,111 @@ dev-kong-whitelist: dev-context
 	echo "wrote $$out_file"
 	kubectl -n dev apply -f k8s/overlays/dev/kong/ip-whitelist.yaml
 
-dev-kong-user:
-	@user=$$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-'); \
+dev-kong-user: dev-context dev-env-init
+	@set -e; \
+	user=$$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-'); \
 	pass_file=".git/dev-kong-user"; \
 	if [ -f "$$pass_file" ]; then \
 		pair=$$(cat "$$pass_file"); \
-		secret_json=$$(aws secretsmanager get-secret-value --secret-id $(AWS_SECRET_NAME) --region $(AWS_REGION) --profile $(AWS_PROFILE) --query SecretString --output text); \
-		exists=$$(echo "$$secret_json" | jq --arg pair "$$pair" '(.KONG_RBAC_USERS // \"\") | split(\",\") | index($pair)'); \
-		if [ "$$exists" != "null" ]; then \
-			echo "user/password already present in AWS Secrets Manager: $$pass_file"; \
-			exit 0; \
+		echo "Using existing Kong RBAC user from $$pass_file (user=$${pair%%:*})"; \
+	else \
+		if command -v openssl >/dev/null 2>&1; then \
+			pass=$$(openssl rand -base64 24 | tr -cd 'a-zA-Z0-9' | head -c 24); \
+		else \
+			pass=$$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 24); \
 		fi; \
-		echo "user/password exists locally but not in AWS; will append"; \
+		pair="$$user:$$pass"; \
+		echo "$$pair" > "$$pass_file"; \
+		echo "Generated Kong RBAC user: $$user"; \
+		echo "Password: $$pass"; \
+		echo "Stored at $$pass_file"; \
 	fi; \
-	if command -v openssl >/dev/null 2>&1; then \
-		pass=$$(openssl rand -base64 24 | tr -cd 'a-zA-Z0-9' | head -c 24); \
+	echo "Updating KONG_RBAC_USERS in $(ENV_FILE)..."; \
+	$(PYTHON) scripts/dev_env.py kong-user-add --env-file "$(ENV_FILE)" --user "$$user" --pair "$$pair"; \
+	$(MAKE) dev-secrets-apply; \
+	if kubectl -n dev get deployment/kong >/dev/null 2>&1; then \
+		echo "==> Restarting Kong to pick up updated RBAC users..."; \
+		kubectl -n dev rollout restart deployment/kong >/dev/null; \
+		kubectl -n dev rollout status deployment/kong --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
 	else \
-		pass=$$(LC_ALL=C tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 24); \
-	fi; \
-	echo "$$user:$$pass" > "$$pass_file"; \
-	echo "Generated Kong RBAC user: $$user"; \
-	echo "Password: $$pass"; \
-	echo "Stored at $$pass_file"; \
-	echo "Updating AWS Secrets Manager..."; \
-	secret_json=$$(aws secretsmanager get-secret-value --secret-id $(AWS_SECRET_NAME) --region $(AWS_REGION) --profile $(AWS_PROFILE) --query SecretString --output text); \
-	updated=$$(echo "$$secret_json" | jq --arg user "$$user" --arg pair "$$user:$$pass" '\
-		.KONG_RBAC_USERS = ( \
-			(.KONG_RBAC_USERS // \"\") \
-			| split(\",\") \
-			| map(select(length > 0)) \
-			| map(select((split(\":\"))[0] != $user)) \
-			| . + [$pair] \
-			| join(\",\") \
-		)'); \
-	aws secretsmanager put-secret-value --secret-id $(AWS_SECRET_NAME) --region $(AWS_REGION) --profile $(AWS_PROFILE) --secret-string "$$updated"; \
-	echo "Updated KONG_RBAC_USERS in AWS Secrets Manager. Re-run: make dev-secrets-apply"
-
-dev-kong-user-remove:
-	@user=$${USER_NAME:-$$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')}; \
-	echo "Removing $$user from KONG_RBAC_USERS..."; \
-	secret_json=$$(aws secretsmanager get-secret-value --secret-id $(AWS_SECRET_NAME) --region $(AWS_REGION) --profile $(AWS_PROFILE) --query SecretString --output text); \
-	exists=$$(echo "$$secret_json" | jq --arg user "$$user" '(.KONG_RBAC_USERS // \"\") | split(\",\") | map(select(length > 0)) | map(split(\":\"))[].0 | index($user)'); \
-	if [ "$$exists" = "null" ]; then \
-		echo "user $$user not found in KONG_RBAC_USERS; aborting"; \
-		exit 1; \
-	fi; \
-	updated=$$(echo "$$secret_json" | jq --arg user "$$user" '\
-		.KONG_RBAC_USERS = ( \
-			(.KONG_RBAC_USERS // \"\") \
-			| split(\",\") \
-			| map(select(length > 0)) \
-			| map(select((split(\":\"))[0] != $user)) \
-			| join(\",\") \
-		)'); \
-	aws secretsmanager put-secret-value --secret-id $(AWS_SECRET_NAME) --region $(AWS_REGION) --profile $(AWS_PROFILE) --secret-string "$$updated"; \
-	echo "Removed $$user. Re-run: make dev-secrets-apply"
-
-ecr-repo-ensure:
-	@if aws ecr describe-repositories --repository-names $(ECR_REPO_NAME) --region $(AWS_REGION) --profile $(AWS_PROFILE) >/dev/null 2>&1; then \
-		echo "ECR repo exists: $(ECR_REPO_NAME)"; \
-	else \
-		aws ecr create-repository --repository-name $(ECR_REPO_NAME) --region $(AWS_REGION) --profile $(AWS_PROFILE); \
+		echo "WARN: deployment/kong not found. Run: make dev"; \
 	fi
 
-dev-ecr-login:
-	aws ecr get-login-password --region $(AWS_REGION) --profile $(AWS_PROFILE) | docker login --username AWS --password-stdin $(ECR_REGISTRY)
-
-dev-ecr-push: dev-build ecr-repo-ensure dev-ecr-login
-	@current=$$(git rev-parse --short HEAD 2>/dev/null || echo local); \
-	last_file=".git/dev-last-image"; \
-	last=""; \
-	if [ -f "$$last_file" ]; then last=$$(cat "$$last_file"); fi; \
-	do_push=0; \
-	if [ -z "$$last" ]; then \
-		echo "no last image recorded; pushing $$current"; \
-		do_push=1; \
-	elif [ "$$last" != "$$current" ]; then \
-		if [ -n "$$CI" ] || [ -n "$$ECR_FORCE_PUSH" ]; then \
-			echo "new commit detected; forced push"; \
-			do_push=1; \
-		else \
-			read -r -p "New commit $$current detected (last $$last). Generate new image? [y/N] " ans; \
-			case "$$ans" in [yY]|[yY][eE][sS]) do_push=1 ;; *) do_push=0 ;; esac; \
-		fi; \
+dev-kong-user-remove: dev-context dev-env-init
+	@set -e; \
+	user=$${USER_NAME:-$$(hostname | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')}; \
+	echo "Removing $$user from KONG_RBAC_USERS in $(ENV_FILE)..."; \
+	$(PYTHON) scripts/dev_env.py kong-user-remove --env-file "$(ENV_FILE)" --user "$$user"; \
+	$(MAKE) dev-secrets-apply; \
+	if kubectl -n dev get deployment/kong >/dev/null 2>&1; then \
+		echo "==> Restarting Kong to pick up updated RBAC users..."; \
+		kubectl -n dev rollout restart deployment/kong >/dev/null; \
+		kubectl -n dev rollout status deployment/kong --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
 	else \
-		echo "commit unchanged ($$current); skipping push"; \
-	fi; \
-	if [ "$$do_push" -eq 1 ]; then \
-		docker tag reliable-message-api:dev $(ECR_REPO_URI):dev-$$current; \
-		docker push $(ECR_REPO_URI):dev-$$current; \
-		echo "$$current" > "$$last_file"; \
-	else \
-		echo "using existing image tag from $$last_file"; \
-	fi
-
-
-dev-ecr-secret-refresh: dev-context
-	@if ! kubectl get ns dev >/dev/null 2>&1; then kubectl create ns dev; fi
-	kubectl -n dev create secret docker-registry ecr-pull \
-		--docker-server=$(ECR_REGISTRY) \
-		--docker-username=AWS \
-		--docker-password="$$(aws ecr get-login-password --region $(AWS_REGION) --profile $(AWS_PROFILE))" \
-		--dry-run=client -o yaml | kubectl apply -f -
-	@kubectl -n dev annotate secret ecr-pull \
-		ecr-pull.bpl/refreshedAtEpoch="$$(date +%s)" \
-		ecr-pull.bpl/refreshedAt="$$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-		--overwrite >/dev/null
-
-dev-ecr-secret-ensure-fresh: dev-context
-	@if ! kubectl get ns dev >/dev/null 2>&1; then kubectl create ns dev; fi
-	@max_age=$$((10*60*60)); \
-	if ! kubectl -n dev get secret ecr-pull >/dev/null 2>&1; then \
-		echo "ecr-pull missing; refreshing"; \
-		$(MAKE) dev-ecr-secret-refresh; \
-	else \
-		ts=$$(kubectl -n dev get secret ecr-pull -o jsonpath='{.metadata.annotations.ecr-pull\\.bpl/refreshedAtEpoch}' 2>/dev/null || true); \
-		now=$$(date +%s); \
-		if [ -z "$$ts" ]; then \
-			echo "ecr-pull timestamp missing; refreshing"; \
-			$(MAKE) dev-ecr-secret-refresh; \
-		elif [ $$((now - ts)) -gt $$max_age ]; then \
-			echo "ecr-pull expired; refreshing"; \
-			$(MAKE) dev-ecr-secret-refresh; \
-		else \
-			echo "ecr-pull fresh"; \
-		fi; \
+		echo "WARN: deployment/kong not found. Run: make dev"; \
 	fi
 
 kustomize-bin:
 	@mkdir -p $(BIN_DIR)
 	@if [ ! -f "$(KUSTOMIZE_BIN)" ]; then \
-		curl -sSL -o /tmp/kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v$(KUSTOMIZE_VERSION)/kustomize_v$(KUSTOMIZE_VERSION)_linux_amd64.tar.gz; \
-		tar -C $(BIN_DIR) -xzf /tmp/kustomize.tar.gz; \
-		chmod +x $(KUSTOMIZE_BIN); \
+		os="linux"; arch="amd64"; \
+		uname_s=$$(uname -s 2>/dev/null || echo ""); \
+		uname_m=$$(uname -m 2>/dev/null || echo ""); \
+		case "$$uname_s" in \
+			Darwin*) os="darwin" ;; \
+			Linux*) os="linux" ;; \
+			MINGW*|MSYS*|CYGWIN*) os="windows" ;; \
+			*) if [ "$(OS)" = "Windows_NT" ]; then os="windows"; fi ;; \
+		esac; \
+		case "$$uname_m" in \
+			x86_64|amd64) arch="amd64" ;; \
+			aarch64|arm64) arch="arm64" ;; \
+		esac; \
+		url="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v$(KUSTOMIZE_VERSION)/kustomize_v$(KUSTOMIZE_VERSION)_$${os}_$${arch}.tar.gz"; \
+		tmp="/tmp/kustomize.$$$$.tar.gz"; \
+		echo "downloading kustomize from $$url"; \
+		curl -sSL -o "$$tmp" "$$url"; \
+		tar -C $(BIN_DIR) -xzf "$$tmp"; \
+		rm -f "$$tmp"; \
+		if [ "$(EXE)" = ".exe" ] && [ -f "$(BIN_DIR)/kustomize" ] && [ ! -f "$(KUSTOMIZE_BIN)" ]; then \
+			mv "$(BIN_DIR)/kustomize" "$(KUSTOMIZE_BIN)"; \
+		fi; \
+		chmod +x $(KUSTOMIZE_BIN) 2>/dev/null || true; \
 	fi
 
 kubeconform-bin:
 	@mkdir -p $(BIN_DIR)
 	@if [ ! -f "$(KUBECONFORM_BIN)" ]; then \
-		curl -sSL -o /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v$(KUBECONFORM_VERSION)/kubeconform-linux-amd64.tar.gz; \
-		tar -C $(BIN_DIR) -xzf /tmp/kubeconform.tar.gz kubeconform; \
-		chmod +x $(KUBECONFORM_BIN); \
+		os="linux"; arch="amd64"; \
+		uname_s=$$(uname -s 2>/dev/null || echo ""); \
+		uname_m=$$(uname -m 2>/dev/null || echo ""); \
+		case "$$uname_s" in \
+			Darwin*) os="darwin" ;; \
+			Linux*) os="linux" ;; \
+			MINGW*|MSYS*|CYGWIN*) os="windows" ;; \
+			*) if [ "$(OS)" = "Windows_NT" ]; then os="windows"; fi ;; \
+		esac; \
+		case "$$uname_m" in \
+			x86_64|amd64) arch="amd64" ;; \
+			aarch64|arm64) arch="arm64" ;; \
+		esac; \
+		archive="kubeconform-$${os}-$${arch}.tar.gz"; \
+		url="https://github.com/yannh/kubeconform/releases/download/v$(KUBECONFORM_VERSION)/$$archive"; \
+		tmp="/tmp/kubeconform.$$$$.tar.gz"; \
+		echo "downloading kubeconform from $$url"; \
+		curl -sSL -o "$$tmp" "$$url"; \
+		tar -C $(BIN_DIR) -xzf "$$tmp"; \
+		rm -f "$$tmp"; \
+		if [ "$(EXE)" = ".exe" ] && [ -f "$(BIN_DIR)/kubeconform" ] && [ ! -f "$(KUBECONFORM_BIN)" ]; then \
+			mv "$(BIN_DIR)/kubeconform" "$(KUBECONFORM_BIN)"; \
+		fi; \
+		chmod +x "$(KUBECONFORM_BIN)" 2>/dev/null || true; \
 	fi
 
 k8s-validate: kustomize-bin kubeconform-bin
 	$(KUSTOMIZE_BIN) build k8s/base | $(KUBECONFORM_BIN) -strict -summary -output text -ignore-missing-schemas
 	$(KUSTOMIZE_BIN) build k8s/overlays/dev | $(KUBECONFORM_BIN) -strict -summary -output text -ignore-missing-schemas
 	$(KUSTOMIZE_BIN) build k8s/overlays/dev-dd | $(KUBECONFORM_BIN) -strict -summary -output text -ignore-missing-schemas
-	$(KUSTOMIZE_BIN) build k8s/overlays/dev/external-secrets | $(KUBECONFORM_BIN) -strict -summary -output text -ignore-missing-schemas
-	$(KUSTOMIZE_BIN) build k8s/overlays/dev/external-secrets/install | $(KUBECONFORM_BIN) -strict -summary -output text -ignore-missing-schemas
 
 dev-status: dev-context
 	kubectl -n dev get pods,svc
@@ -592,15 +609,24 @@ dev-logs: dev-context
 dev-psql: dev-context
 	kubectl -n dev exec -it statefulset/postgres -- psql -U postgres -d messages
 
-dev:
+dev-up:
 	$(MAKE) kind-up
 	$(MAKE) dev-context
 	$(MAKE) dev-secrets-apply
 	$(MAKE) dev-tls
 	$(MAKE) dev-kong-whitelist
-	$(MAKE) dev-ecr-push
-	$(MAKE) dev-ecr-secret-refresh
 	$(MAKE) dev-apply
+	$(MAKE) dev-rollout
+	@echo "==> Dev pronto."
+	@echo "==> Port-forward (bg): make dev-port-bg"
+	@echo "==> Port-forward (fg): make dev-port"
+
+dev:
+	$(MAKE) dev-up
+	$(MAKE) dev-port-bg
+
+dev-fg:
+	$(MAKE) dev-up
 	$(MAKE) dev-port
 
 dev-verify: dev-context
@@ -608,16 +634,25 @@ dev-verify: dev-context
 	echo "Checking secrets..."; \
 	kubectl -n dev get secret app-secrets >/dev/null; \
 	kubectl -n dev get secret kong-local-tls >/dev/null; \
-	kubectl -n dev get secret ecr-pull >/dev/null; \
+	require_api_key=$$(kubectl -n dev get secret app-secrets -o jsonpath='{.data.REQUIRE_API_KEY}' 2>/dev/null | base64 -d 2>/dev/null | tr '[:upper:]' '[:lower:]' || true); \
+	if [ -z "$$require_api_key" ]; then require_api_key="false"; fi; \
+	api_key=""; \
+	if [ "$$require_api_key" = "true" ]; then \
+		api_key=$$(kubectl -n dev get secret app-secrets -o jsonpath='{.data.API_KEY}' | base64 -d); \
+		if [ -z "$$api_key" ]; then \
+			echo "ERROR: REQUIRE_API_KEY=true but API_KEY is empty in dev/app-secrets"; \
+			exit 1; \
+		fi; \
+	fi; \
 	echo "Starting port-forwards..."; \
-	kubectl -n dev port-forward svc/kong-proxy 8080:80 >/tmp/dev-kong-proxy.log 2>&1 & \
+	kubectl -n dev port-forward svc/kong-proxy 18080:80 18443:443 >/tmp/dev-kong-proxy.log 2>&1 & \
 	pid_proxy=$$!; \
-	kubectl -n dev port-forward svc/kong-admin 8001:8001 8002:8002 >/tmp/dev-kong-admin.log 2>&1 & \
+	kubectl -n dev port-forward svc/kong-admin 18001:8001 18002:8002 >/tmp/dev-kong-admin.log 2>&1 & \
 	pid_admin=$$!; \
 	trap 'kill $$pid_proxy $$pid_admin >/dev/null 2>&1 || true' EXIT; \
 	timeout=60; \
 	elapsed=0; \
-	until curl -sS http://localhost:8001/status >/dev/null 2>&1; do \
+	until curl -sS --max-time 2 http://localhost:18001/status >/dev/null 2>&1; do \
 		if [ $$elapsed -ge $$timeout ]; then \
 			echo "timeout waiting for kong admin"; \
 			exit 1; \
@@ -627,27 +662,56 @@ dev-verify: dev-context
 	done; \
 	timeout=60; \
 	elapsed=0; \
-	until curl -sS -H "Host: api.local.dev" http://localhost:8080/health >/dev/null 2>&1; do \
+	while :; do \
+		if [ "$$require_api_key" = "true" ]; then \
+			code=$$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' -H "Host: api.local.dev" -H "X-API-Key: $$api_key" http://localhost:18080/health 2>/dev/null || echo 000); \
+		else \
+			code=$$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' -H "Host: api.local.dev" http://localhost:18080/health 2>/dev/null || echo 000); \
+		fi; \
+		if [ "$$code" = "200" ]; then \
+			break; \
+		fi; \
 		if [ $$elapsed -ge $$timeout ]; then \
-			echo "timeout waiting for kong proxy"; \
+			echo "timeout waiting for kong proxy (http_code=$$code)"; \
+			echo "Proxy port-forward log (last 50 lines):"; \
+			tail -n 50 /tmp/dev-kong-proxy.log || true; \
 			exit 1; \
 		fi; \
 		sleep 2; \
 		elapsed=$$((elapsed+2)); \
 	done; \
 	echo "Checking Kong RBAC..."; \
-	token=$$(aws secretsmanager get-secret-value --secret-id $(AWS_SECRET_NAME) --region $(AWS_REGION) --profile $(AWS_PROFILE) --query SecretString --output text | jq -r '.KONG_ADMIN_TOKEN'); \
-	curl -sS -H "Kong-Admin-Token: $$token" http://localhost:8001/status >/dev/null; \
+	token=$$(kubectl -n dev get secret app-secrets -o jsonpath='{.data.KONG_ADMIN_TOKEN}' | base64 -d); \
+	curl -sS --max-time 3 -H "Kong-Admin-Token: $$token" http://localhost:18001/status >/dev/null; \
 	echo "Checking Kong routes..."; \
-	curl -sS -H "Kong-Admin-Token: $$token" http://localhost:8001/routes | jq -e '.data[] | select(.name==\"api\")' >/dev/null; \
+	curl -sS --max-time 5 -H "Kong-Admin-Token: $$token" http://localhost:18001/routes | jq -e '(.data // [])[] | select(((.hosts // []) | index("api.local.dev")) or ((.snis // []) | index("api.local.dev"))) | select((.protocols // []) | index("https"))' >/dev/null || { \
+		echo "ERROR: Kong route for api.local.dev with protocol https not found."; \
+		echo "Tip: check Ingress annotation konghq.com/protocols and KIC logs."; \
+		exit 1; \
+	}; \
 	echo "Checking Ingress TLS..."; \
-	curl -skI https://api.local.dev/health | head -n 1 | grep -q "200"; \
-	echo "Checking API health via Kong..."; \
-	curl -sS -H "Host: api.local.dev" http://localhost:8080/health | jq -e '.status==\"ok\"' >/dev/null; \
-	echo "dev-verify OK"
+	if [ "$$require_api_key" = "true" ]; then \
+		code=$$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' --resolve api.local.dev:18443:127.0.0.1 -H "Host: api.local.dev" -H "X-API-Key: $$api_key" https://api.local.dev:18443/health 2>/dev/null || echo 000); \
+	else \
+		code=$$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' --resolve api.local.dev:18443:127.0.0.1 -H "Host: api.local.dev" https://api.local.dev:18443/health 2>/dev/null || echo 000); \
+	fi; \
+	if [ "$$code" != "200" ]; then \
+		echo "ERROR: expected HTTPS /health to return 200, got $$code"; \
+		echo "Proxy port-forward log (last 50 lines):"; \
+		tail -n 50 /tmp/dev-kong-proxy.log || true; \
+		exit 1; \
+	fi; \
+		echo "Checking API health via Kong..."; \
+		if [ "$$require_api_key" = "true" ]; then \
+			curl -sS --max-time 5 -H "Host: api.local.dev" -H "X-API-Key: $$api_key" http://localhost:18080/health | jq -e '.status=="ok"' >/dev/null; \
+		else \
+			curl -sS --max-time 5 -H "Host: api.local.dev" http://localhost:18080/health | jq -e '.status=="ok"' >/dev/null; \
+		fi; \
+		echo "dev-verify OK"
 
 dev-clean: dev-context
 	@echo "This will delete the dev namespace, kind cluster, and prune build cache."
+	-$(MAKE) dev-port-stop >/dev/null 2>&1 || true
 	kubectl delete ns dev --ignore-not-found=true
 	$(MAKE) kind-down
 	docker builder prune -f

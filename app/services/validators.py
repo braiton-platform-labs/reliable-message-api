@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import unicodedata
 
 
@@ -28,7 +27,7 @@ def validate_message(message: str) -> None:
             details.append("message must be at least 5 characters")
         if len(message) > 200:
             details.append("message must be at most 200 characters")
-        if not re.search(r"[A-Za-z0-9]", message):
+        if not any(ch.isalnum() for ch in message):
             details.append("message must contain at least one alphanumeric character")
 
     if details:

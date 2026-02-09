@@ -1,8 +1,0 @@
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: external-secrets-cert-controller
-subjects:
-  - kind: ServiceAccount
-    name: external-secrets-cert-controller
-    namespace: external-secrets

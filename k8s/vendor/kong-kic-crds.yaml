@@ -1,0 +1,296 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kongplugins.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: kongplugins
+    singular: kongplugin
+    kind: KongPlugin
+    shortNames:
+      - kp
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kongclusterplugins.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Cluster
+  names:
+    plural: kongclusterplugins
+    singular: kongclusterplugin
+    kind: KongClusterPlugin
+    shortNames:
+      - kcp
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kongconsumers.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: kongconsumers
+    singular: kongconsumer
+    kind: KongConsumer
+    shortNames:
+      - kc
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kongingresses.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: kongingresses
+    singular: kongingress
+    kind: KongIngress
+    shortNames:
+      - ki
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: tcpingresses.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: tcpingresses
+    singular: tcpingress
+    kind: TCPIngress
+    shortNames:
+      - tci
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: udpingresses.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: udpingresses
+    singular: udpingress
+    kind: UDPIngress
+    shortNames:
+      - udi
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: ingressclassparameters.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Cluster
+  names:
+    plural: ingressclassparameters
+    singular: ingressclassparameters
+    kind: IngressClassParameters
+    shortNames:
+      - icp
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kongupstreampolicies.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: kongupstreampolicies
+    singular: kongupstreampolicy
+    kind: KongUpstreamPolicy
+    shortNames:
+      - kup
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kongconsumergroups.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: kongconsumergroups
+    singular: kongconsumergroup
+    kind: KongConsumerGroup
+    shortNames:
+      - kcg
+  versions:
+    - name: v1beta1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kongcustomentities.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: kongcustomentities
+    singular: kongcustomentity
+    kind: KongCustomEntity
+    shortNames:
+      - kce
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kongvaults.configuration.konghq.com
+  labels:
+    app.kubernetes.io/name: kong
+    app.kubernetes.io/part-of: reliable-message-api
+spec:
+  group: configuration.konghq.com
+  scope: Namespaced
+  names:
+    plural: kongvaults
+    singular: kongvault
+    kind: KongVault
+    shortNames:
+      - kv
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true

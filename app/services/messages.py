@@ -84,6 +84,9 @@ def delete_message(db: Session, message_id: uuid.UUID) -> None:
 
 
 def reset_messages(db: Session) -> int:
+    # Reset should wipe all API state. Keeping idempotency keys would allow replaying
+    # responses for messages that no longer exist.
+    db.execute(delete(IdempotencyKey))
     result = db.execute(delete(Message))
     db.commit()
     return result.rowcount or 0

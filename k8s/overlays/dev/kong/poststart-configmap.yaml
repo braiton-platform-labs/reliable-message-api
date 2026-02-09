@@ -8,34 +8,71 @@ metadata:
 data:
   poststart-bootstrap.sh: |
     #!/usr/bin/env sh
-    set -e
+    # Best-effort bootstrap for local dev.
+    # This must never block or crash Kong startup; if bootstrap can't complete yet, exit 0.
+    set -u
 
-    until curl -sS http://127.0.0.1:8001/status >/dev/null; do
-      echo "waiting for kong admin";
-      sleep 2;
+    max_wait_seconds="${KONG_BOOTSTRAP_WAIT_SECONDS:-120}"
+    start="$(date +%s)"
+
+    while :; do
+      now="$(date +%s)"
+      elapsed="$((now - start))"
+      if [ "$elapsed" -ge "$max_wait_seconds" ]; then
+        echo "kong bootstrap: timeout waiting for admin after ${elapsed}s; skipping"
+        exit 0
+      fi
+      if curl -sS --max-time 2 http://127.0.0.1:8001/status >/dev/null 2>&1; then
+        break
+      fi
+      echo "waiting for kong admin (${elapsed}s/${max_wait_seconds}s)"
+      sleep 2
     done
 
-    curl -sS -X PUT http://127.0.0.1:8001/services/api \
-      -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
-      -d name=api \
-      -d url=http://api.dev.svc.cluster.local:80
+    kong_put() {
+      path="$1"
+      shift
+      curl -sS --max-time 5 -X PUT "http://127.0.0.1:8001${path}" \
+        -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+        "$@" >/dev/null 2>&1 || return 1
+      return 0
+    }
 
-    curl -sS -X PUT http://127.0.0.1:8001/routes/api \
-      -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
-      -d name=api \
-      -d paths[]=/ \
-      -d strip_path=false \
-      -d service.name=api
+    kong_post() {
+      path="$1"
+      shift
+      curl -sS --max-time 5 -X POST "http://127.0.0.1:8001${path}" \
+        -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+        "$@" >/dev/null 2>&1 || return 1
+      return 0
+    }
 
-    curl -sS -X PUT http://127.0.0.1:8001/rbac/users/${KONG_ADMIN_GUI_USER} \
-      -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+    kong_delete() {
+      path="$1"
+      shift || true
+      curl -sS --max-time 5 -X DELETE "http://127.0.0.1:8001${path}" \
+        -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
+        "$@" >/dev/null 2>&1 || return 1
+      return 0
+    }
+
+    # Cleanup legacy bootstrap entities from older dev flows (safe to ignore failures).
+    kong_delete "/routes/api" || true
+    kong_delete "/services/api" || true
+
+    # NOTE: Services/routes are managed by the Kong Ingress Controller (KIC) via Kubernetes Ingress resources.
+    # This bootstrap is only responsible for Kong Manager RBAC user setup for local dev.
+
+    if ! kong_put "/rbac/users/${KONG_ADMIN_GUI_USER}" \
       -d name=${KONG_ADMIN_GUI_USER} \
       -d user_token=${KONG_ADMIN_TOKEN} \
-      -d password=${KONG_ADMIN_GUI_PASSWORD} || true
+      -d password=${KONG_ADMIN_GUI_PASSWORD}; then
+      echo "kong bootstrap: failed to upsert admin GUI user (ignored)"
+    fi
 
-    curl -sS -X POST http://127.0.0.1:8001/rbac/users/${KONG_ADMIN_GUI_USER}/roles \
-      -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
-      -d roles=admin || true
+    if ! kong_post "/rbac/users/${KONG_ADMIN_GUI_USER}/roles" -d roles=admin; then
+      echo "kong bootstrap: failed to assign admin role to GUI user (ignored)"
+    fi
 
     if [ -n "${KONG_RBAC_USERS}" ]; then
       IFS=','; \
@@ -43,14 +80,14 @@ data:
         user=$(echo "$entry" | cut -d: -f1); \
         pass=$(echo "$entry" | cut -d: -f2-); \
         if [ -n "$user" ] && [ -n "$pass" ]; then \
-          curl -sS -X PUT http://127.0.0.1:8001/rbac/users/${user} \
-            -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
-            -d name=${user} \
-            -d user_token=${KONG_ADMIN_TOKEN} \
-            -d password=${pass} || true; \
-          curl -sS -X POST http://127.0.0.1:8001/rbac/users/${user}/roles \
-            -H "Kong-Admin-Token: ${KONG_ADMIN_TOKEN}" \
-            -d roles=admin || true; \
+          if ! kong_put "/rbac/users/${user}" -d name=${user} -d user_token=${KONG_ADMIN_TOKEN} -d password=${pass}; then \
+            echo "kong bootstrap: failed to upsert RBAC user ${user} (ignored)"; \
+          fi; \
+          if ! kong_post "/rbac/users/${user}/roles" -d roles=admin; then \
+            echo "kong bootstrap: failed to assign role for ${user} (ignored)"; \
+          fi; \
         fi; \
       done; \
     fi
+
+    echo "kong bootstrap: done"

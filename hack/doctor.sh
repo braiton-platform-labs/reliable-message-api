@@ -14,7 +14,6 @@ fi
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.35.0}"
 KIND_VERSION="${KIND_VERSION:-v0.30.0}"
 JQ_VERSION="${JQ_VERSION:-1.8.1}"
-AWSCLI_VERSION="${AWSCLI_VERSION:-2.33.17}"
 MKCERT_VERSION="${MKCERT_VERSION:-1.4.4}"
 KUSTOMIZE_VERSION="${KUSTOMIZE_VERSION:-5.8.0}"
 KUBECONFORM_VERSION="${KUBECONFORM_VERSION:-0.7.0}"
@@ -113,13 +112,6 @@ get_jq_version() {
     jq --version 2>/dev/null | sed 's/^jq-//'
   fi
 }
-get_awscli_version() {
-  if command -v aws >/dev/null 2>&1; then
-    local first
-    first="$(aws --version 2>/dev/null | awk '{print $1}')"
-    echo "${first#aws-cli/}"
-  fi
-}
 get_mkcert_version() {
   if command -v mkcert >/dev/null 2>&1; then
     mkcert -version 2>/dev/null | head -n1 | awk '{print $1}' | sed 's/^v//'
@@ -190,32 +182,22 @@ check_min "unzip" "unzip" "$(get_unzip_version)" "${UNZIP_MIN_VERSION}" || true
 check_exact "kubectl" "kubectl" "$(get_kubectl_version)" "${KUBECTL_VERSION}" || true
 check_exact "kind" "kind" "$(get_kind_version)" "${KIND_VERSION}" || true
 check_exact "jq" "jq" "$(get_jq_version)" "${JQ_VERSION}" || true
-check_exact "awscli" "aws" "$(get_awscli_version)" "${AWSCLI_VERSION}" || true
 check_exact "mkcert" "mkcert" "$(get_mkcert_version)" "${MKCERT_VERSION}" || true
 check_exact "kustomize" "kustomize" "$(get_kustomize_version)" "${KUSTOMIZE_VERSION}" || true
 check_exact "kubeconform" "kubeconform" "$(get_kubeconform_version)" "${KUBECONFORM_VERSION}" || true
 
-AWS_REGION="${AWS_REGION:-us-east-1}"
-AWS_PROFILE="${AWS_PROFILE:-default}"
-
 echo
-echo "AWS_REGION=${AWS_REGION}"
-echo "AWS_PROFILE=${AWS_PROFILE}"
-
-aws sts get-caller-identity --region "${AWS_REGION}" --profile "${AWS_PROFILE}" >/dev/null && echo "aws identity ok"
+if [ -f "${ROOT_DIR}/.env" ]; then
+  echo ".env present"
+else
+  echo ".env missing (run: make dev-env-init)"
+fi
 
 if kubectl get ns dev >/dev/null 2>&1; then
-  if kubectl -n dev get secret ecr-pull >/dev/null 2>&1; then
-    ts=$(kubectl -n dev get secret ecr-pull -o jsonpath='{.metadata.annotations.ecr-pull\.bpl/refreshedAtEpoch}' 2>/dev/null || true)
-    if [ -n "$ts" ]; then
-      now=$(date +%s)
-      age=$((now - ts))
-      echo "ecr-pull age seconds=${age}"
-    else
-      echo "ecr-pull missing refreshedAtEpoch annotation"
-    fi
+  if kubectl -n dev get secret app-secrets >/dev/null 2>&1; then
+    echo "app-secrets present in dev namespace"
   else
-    echo "ecr-pull secret not found in dev namespace"
+    echo "app-secrets not found in dev namespace"
   fi
 else
   echo "dev namespace not found"

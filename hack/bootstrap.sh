@@ -15,7 +15,6 @@ fi
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.35.0}"
 KIND_VERSION="${KIND_VERSION:-v0.30.0}"
 JQ_VERSION="${JQ_VERSION:-1.8.1}"
-AWSCLI_VERSION="${AWSCLI_VERSION:-2.33.17}"
 MKCERT_VERSION="${MKCERT_VERSION:-1.4.4}"
 KUSTOMIZE_VERSION="${KUSTOMIZE_VERSION:-5.8.0}"
 KUBECONFORM_VERSION="${KUBECONFORM_VERSION:-0.7.0}"
@@ -52,7 +51,7 @@ log() {
 }
 
 declare -A SUMMARY_MAP
-SUMMARY_ORDER=(apt-system sysctl network-tools curl wget unzip git make python3 openssl docker mkcert kubectl kind kube-context jq kustomize kubeconform awscli)
+SUMMARY_ORDER=(apt-system sysctl network-tools curl wget unzip git make python3 openssl docker mkcert kubectl kind kube-context jq kustomize kubeconform)
 FAILED=0
 BOOTSTRAP_PRINTED=0
 
@@ -367,16 +366,12 @@ finalize() {
   if [ "${SUMMARY_MAP[kubeconform]}" = "PENDING" ]; then
     status_exact "kubeconform" "$(get_kubeconform_version "${BIN_DIR}/kubeconform" || true)" "${KUBECONFORM_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[awscli]}" = "PENDING" ]; then
-    status_min "awscli" "$(get_awscli_version "${BIN_DIR}/aws" || true)" "${AWSCLI_VERSION}"
-  fi
   log "final versions:"
   log_kv "kubectl" "$(get_kubectl_version "${BIN_DIR}/kubectl" || true)"
   log_kv "kind" "$(get_kind_version "${BIN_DIR}/kind" || true)"
   log_kv "kube-context" "$(get_current_kube_context || true)"
   log_kv "kube-context expected" "${BOOTSTRAP_EXPECTED_KUBE_CONTEXT}"
   log_kv "jq" "$(get_jq_version "${BIN_DIR}/jq" || true)"
-  log_kv "awscli" "$(get_awscli_version "${BIN_DIR}/aws" || true)"
   log_kv "mkcert" "$(get_mkcert_version || true)"
   log_kv "kustomize" "$(get_kustomize_version "${BIN_DIR}/kustomize" || true)"
   log_kv "kubeconform" "$(get_kubeconform_version "${BIN_DIR}/kubeconform" || true)"
@@ -839,71 +834,6 @@ install_kubeconform() {
   got="$(get_kubeconform_version "${BIN_DIR}/kubeconform" || true)"
   if [ "${got}" != "${KUBECONFORM_VERSION}" ]; then
     log "kubeconform install failed (got ${got:-unknown}, expected ${KUBECONFORM_VERSION})"
-    exit 1
-  fi
-}
-
-install_awscli_linux() {
-  if ! have_cmd unzip; then
-    log "unzip not found; install unzip and re-run"
-    exit 1
-  fi
-  local arch="$1"
-  local aws_arch="${arch}"
-  if [ "${arch}" = "amd64" ]; then
-    aws_arch="x86_64"
-  elif [ "${arch}" = "arm64" ]; then
-    aws_arch="aarch64"
-  fi
-  local url_versioned="https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}-${AWSCLI_VERSION}.zip"
-  local url_latest="https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip"
-  log "installing awscli ${AWSCLI_VERSION}"
-  rm -rf /tmp/awscli /tmp/awscliv2.zip
-  if ! download_optional "${url_versioned}" "/tmp/awscliv2.zip"; then
-    log "awscli versioned artifact not found (${url_versioned}); falling back to latest"
-    download "${url_latest}" "/tmp/awscliv2.zip"
-  fi
-  if ! unzip -tq /tmp/awscliv2.zip >/dev/null 2>&1; then
-    log "awscli zip is invalid (download blocked or corrupted)"
-    log "install manually: sudo apt-get update && sudo apt-get install -y awscli"
-    exit 1
-  fi
-  unzip -q /tmp/awscliv2.zip -d /tmp
-  if [ "${BOOTSTRAP_INSTALL_MODE}" = "system" ] || [ "${BOOTSTRAP_ENFORCE_GLOBAL_BIN}" = "1" ] || [ "${BOOTSTRAP_ENFORCE_GLOBAL_BIN}" = "true" ]; then
-    if [ -w "${BOOTSTRAP_GLOBAL_BIN_DIR}" ]; then
-      /tmp/aws/install --bin-dir "${BOOTSTRAP_GLOBAL_BIN_DIR}" --install-dir /usr/local/aws-cli --update
-      return 0
-    fi
-    if run_privileged /tmp/aws/install --bin-dir "${BOOTSTRAP_GLOBAL_BIN_DIR}" --install-dir /usr/local/aws-cli --update; then
-      return 0
-    fi
-    if [ "${BOOTSTRAP_ENFORCE_GLOBAL_BIN}" = "1" ] || [ "${BOOTSTRAP_ENFORCE_GLOBAL_BIN}" = "true" ]; then
-      log "failed to install awscli into ${BOOTSTRAP_GLOBAL_BIN_DIR}"
-      log "re-run with sudo or grant write permission to ${BOOTSTRAP_GLOBAL_BIN_DIR}"
-      exit 1
-    fi
-    /tmp/aws/install --bin-dir "${BIN_DIR}" --install-dir "${ROOT_DIR}/.aws-cli" --update
-  else
-    /tmp/aws/install --bin-dir "${BIN_DIR}" --install-dir "${ROOT_DIR}/.aws-cli" --update
-  fi
-}
-
-install_awscli_darwin() {
-  if have_cmd brew; then
-    log "installing awscli via brew"
-    brew install awscli || brew upgrade awscli
-  else
-    log "brew not found; install AWS CLI manually from https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
-  fi
-}
-
-install_awscli_windows() {
-  if command -v powershell.exe >/dev/null 2>&1; then
-    log "delegating to PowerShell bootstrap"
-    powershell.exe -ExecutionPolicy Bypass -File "${ROOT_DIR}\\hack\\bootstrap.ps1"
-    exit 0
-  else
-    log "PowerShell not found; install AWS CLI manually"
     exit 1
   fi
 }
@@ -1407,19 +1337,6 @@ get_jq_version() {
   fi
 }
 
-get_awscli_version() {
-  local bin="$1"
-  if have_cmd aws; then
-    local first
-    first="$(aws --version 2>/dev/null | awk '{print $1}')"
-    echo "${first#aws-cli/}"
-  elif allow_local_bin_fallback && [ -x "${bin}" ]; then
-    local first
-    first="$("${bin}" --version 2>/dev/null | awk '{print $1}')"
-    echo "${first#aws-cli/}"
-  fi
-}
-
 get_mkcert_version() {
   if have_cmd mkcert; then
     mkcert -version 2>/dev/null | head -n1 | awk '{print $1}' | sed 's/^v//'
@@ -1583,58 +1500,6 @@ ensure_kubeconform() {
   log_duration "kubeconform install" "${start}"
 }
 
-ensure_awscli_linux() {
-  local current
-  local start
-  start="$(date +%s)"
-  current="$(get_awscli_version "${BIN_DIR}/aws" || true)"
-  log_kv "awscli detected" "${current}"
-  if [ -n "${current}" ] && version_ge "${AWSCLI_VERSION}" "${current}"; then
-    log "awscli ${current} OK (min ${AWSCLI_VERSION})"
-    warn_path_precedence aws
-    log_duration "awscli check" "${start}"
-    return
-  fi
-  if [ -x "${BIN_DIR}/aws" ]; then
-    confirm_reinstall "awscli" "${current}" "${AWSCLI_VERSION}"
-    log "removing awscli ${current:-unknown} from ${BIN_DIR}"
-    rm -f "${BIN_DIR}/aws"
-  fi
-  install_awscli_linux "$@"
-  current="$(get_awscli_version "${BIN_DIR}/aws" || true)"
-  log_kv "awscli installed" "${current}"
-  if [ -z "${current}" ] || ! version_ge "${AWSCLI_VERSION}" "${current}"; then
-    log "awscli version too old (current=${current:-unknown}, min=${AWSCLI_VERSION})"
-    exit 1
-  fi
-  warn_path_precedence aws
-  log_duration "awscli install" "${start}"
-}
-
-ensure_awscli_darwin() {
-  local current
-  local start
-  start="$(date +%s)"
-  if have_cmd aws; then
-    current="$(aws --version 2>/dev/null | awk '{print $1}' | sed 's#^aws-cli/##')"
-  fi
-  log_kv "awscli detected" "${current}"
-  if [ -n "${current:-}" ] && version_ge "${AWSCLI_VERSION}" "${current}"; then
-    log "awscli ${current} OK (min ${AWSCLI_VERSION})"
-    log_duration "awscli check" "${start}"
-    return
-  fi
-  confirm_reinstall "awscli" "${current}" "${AWSCLI_VERSION}"
-  install_awscli_darwin
-  current="$(aws --version 2>/dev/null | awk '{print $1}' | sed 's#^aws-cli/##')"
-  log_kv "awscli installed" "${current}"
-  if [ -z "${current:-}" ] || ! version_ge "${AWSCLI_VERSION}" "${current}"; then
-    log "awscli version too old: ${current:-unknown} (min ${AWSCLI_VERSION})"
-    exit 1
-  fi
-  log_duration "awscli install" "${start}"
-}
-
 main() {
   local os arch
   local start_all
@@ -1647,14 +1512,10 @@ main() {
     exit 1
   fi
 
-  if [ "${os}" = "windows" ]; then
-    install_awscli_windows
-  fi
-
   ensure_bin_dir
   summary_init
   log "runtime user: $(id -un) (uid=$(id -u))"
-  log "target versions (security/compat): kubectl=${KUBECTL_VERSION}, kind=${KIND_VERSION}, jq=${JQ_VERSION}, awscli=${AWSCLI_VERSION}, mkcert=${MKCERT_VERSION}, kustomize=${KUSTOMIZE_VERSION}, kubeconform=${KUBECONFORM_VERSION}, docker>=${DOCKER_ENGINE_MIN_VERSION}, git>=${GIT_VERSION}, make>=${MAKE_VERSION}, python3>=${PYTHON_VERSION}, openssl>=${OPENSSL_MIN_VERSION}, curl>=${CURL_MIN_VERSION}, wget>=${WGET_MIN_VERSION}, unzip>=${UNZIP_MIN_VERSION}"
+  log "target versions (security/compat): kubectl=${KUBECTL_VERSION}, kind=${KIND_VERSION}, jq=${JQ_VERSION}, mkcert=${MKCERT_VERSION}, kustomize=${KUSTOMIZE_VERSION}, kubeconform=${KUBECONFORM_VERSION}, docker>=${DOCKER_ENGINE_MIN_VERSION}, git>=${GIT_VERSION}, make>=${MAKE_VERSION}, python3>=${PYTHON_VERSION}, openssl>=${OPENSSL_MIN_VERSION}, curl>=${CURL_MIN_VERSION}, wget>=${WGET_MIN_VERSION}, unzip>=${UNZIP_MIN_VERSION}"
   log "global binary mode: BOOTSTRAP_ENFORCE_GLOBAL_BIN=${BOOTSTRAP_ENFORCE_GLOBAL_BIN}, BOOTSTRAP_GLOBAL_BIN_DIR=${BOOTSTRAP_GLOBAL_BIN_DIR}"
   log "kube context controls: BOOTSTRAP_EXPECTED_KUBE_CONTEXT=${BOOTSTRAP_EXPECTED_KUBE_CONTEXT}, BOOTSTRAP_AUTO_KUBECONTEXT=${BOOTSTRAP_AUTO_KUBECONTEXT}"
   log "sysctl controls: BOOTSTRAP_TUNE_SYSCTL=${BOOTSTRAP_TUNE_SYSCTL}, BOOTSTRAP_SYSCTL_PERSIST=${BOOTSTRAP_SYSCTL_PERSIST}"
@@ -1681,11 +1542,6 @@ main() {
   run_step "jq" ensure_jq "${os}" "${arch}"
   run_step "kustomize" ensure_kustomize "${os}" "${arch}"
   run_step "kubeconform" ensure_kubeconform "${os}" "${arch}"
-
-  case "${os}" in
-    linux) run_step "awscli" ensure_awscli_linux "${arch}" ;;
-    darwin) run_step "awscli" ensure_awscli_darwin ;;
-  esac
 
   refresh_shell_command_cache
   print_terminal_refresh_hint
