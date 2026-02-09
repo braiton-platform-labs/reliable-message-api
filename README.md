@@ -17,8 +17,10 @@ Prereqs:
 - Optional: `mkcert` for local TLS (otherwise disable SSL verification in Postman)
 
 Windows 11:
-- Run dev commands from Git Bash (recommended) or WSL2.
-- The `Makefile` uses a POSIX shell; it won't work in plain PowerShell `cmd` semantics.
+- Run `make ...` commands from Git Bash (recommended) or WSL2.
+- The `Makefile` uses a POSIX shell; it won't work in plain PowerShell/cmd semantics.
+- Docker Desktop is required (daemon running). Automated installer: `.\hack\install-docker.cmd` (Admin; may require reboot).
+- Pré-requisito: virtualização ativada no BIOS/UEFI (Intel VT-x / AMD-V). Sem isso, WSL2/Docker/kind não funcionam.
 
 Run:
 ```bash
@@ -183,9 +185,24 @@ Linux/macOS:
 `./hack/bootstrap.sh`
 
 Windows (PowerShell):
-`powershell -ExecutionPolicy Bypass -File .\\hack\\bootstrap.ps1`
+`.\hack\bootstrap.cmd`
+
+(Fallback if you prefer calling PowerShell directly: `powershell -ExecutionPolicy Bypass -File .\\hack\\bootstrap.ps1`)
+
+Note: `bootstrap.cmd` defaults to `BOOTSTRAP_INSTALL_MODE=local` (installs into `.\bin`) to avoid requiring Administrator permissions on Windows.
 
 Versões ficam em `hack/tool-versions.env` e podem ser ajustadas conforme necessário.
+
+## Docker Desktop (Windows 11)
+Instalação automatizada (via `winget`, habilita WSL2 se necessário):
+
+`.\hack\install-docker.cmd`
+
+Opcional:
+- `.\hack\install-docker.cmd -AutoReboot` (reboot automático se precisar)
+- `.\hack\install-docker.cmd -WaitSeconds 300` (espera mais tempo pelo daemon)
+
+Obs: se a virtualização estiver desabilitada no BIOS/UEFI, o script vai avisar, mas você vai precisar habilitar manualmente.
 
 ## Kubernetes Manifests
 - `k8s/base`: API Deployment + Service.

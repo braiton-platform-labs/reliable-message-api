@@ -18,6 +18,25 @@ $Summary = [ordered]@{}
 $SummaryOrder | ForEach-Object { $Summary[$_] = "PENDING" }
 $WingetUsed = [ordered]@{}
 $HadFailure = $false
+$script:HasWinget = $false
+
+function Write-StepErrorDetails($err) {
+  if (-not (Test-Truthy $env:BOOTSTRAP_DEBUG)) { return }
+
+  try {
+    if ($err.InvocationInfo -and $err.InvocationInfo.ScriptName) {
+      Write-Host ("at {0}:{1}" -f $err.InvocationInfo.ScriptName, $err.InvocationInfo.ScriptLineNumber) -ForegroundColor DarkGray
+      if ($err.InvocationInfo.Line) {
+        Write-Host $err.InvocationInfo.Line.TrimEnd() -ForegroundColor DarkGray
+      }
+    }
+    if ($err.ScriptStackTrace) {
+      Write-Host $err.ScriptStackTrace -ForegroundColor DarkGray
+    }
+  } catch {
+    # Best-effort debug output only.
+  }
+}
 
 function Load-Versions($path) {
   if (-not (Test-Path $path)) { return }
@@ -138,6 +157,14 @@ if ($InstallBinDir -ne $BinDir -and $env:PATH -notlike "*$BinDir*") {
   $env:PATH = "$BinDir;$env:PATH"
 }
 
+$WingetUserLinksDir = Join-Path $env:LOCALAPPDATA "Microsoft\\WinGet\\Links"
+$WingetMachineLinksDir = Join-Path $Env:ProgramFiles "WinGet\\Links"
+foreach ($d in @($WingetUserLinksDir, $WingetMachineLinksDir)) {
+  if ($d -and (Test-Path $d) -and ($env:PATH -notlike "*$d*")) {
+    $env:PATH = "$d;$env:PATH"
+  }
+}
+
 Write-Host "Target versions (security/compat): kubectl=$kubectlVersion kind=$kindVersion jq=$jqVersion mkcert=$mkcertVersion kustomize=$kustomizeVersion kubeconform=$kubeconformVersion docker>=$dockerEngineMinVersion git>=$gitVersion make>=$makeVersion python>=$pythonVersion openssl>=$opensslMinVersion curl>=$curlMinVersion wget>=$wgetMinVersion unzip>=$unzipMinVersion"
 Write-Host "SHA256 verification enabled for kubectl, kind, jq, mkcert, kustomize, kubeconform downloads."
 Write-Host "Set BOOTSTRAP_AUTO_CONFIRM=1 to auto-accept reinstalls."
@@ -145,25 +172,112 @@ Write-Host "global binary mode: BOOTSTRAP_ENFORCE_GLOBAL_BIN=$bootstrapEnforceGl
 Write-Host "kube context controls: BOOTSTRAP_EXPECTED_KUBE_CONTEXT=$bootstrapExpectedKubeContext BOOTSTRAP_AUTO_KUBECONTEXT=$bootstrapAutoKubeContext"
 
 function Require-Winget {
-  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Write-Host "winget not found. Install App Installer from Microsoft Store." -ForegroundColor Yellow
-    throw "bootstrap step failed"
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    $script:HasWinget = $true
+    return
   }
+  Write-Host "winget not found. Install App Installer from Microsoft Store (optional; bootstrap can still download pinned tools directly)." -ForegroundColor Yellow
+  $script:HasWinget = $false
 }
 
 Require-Winget
 
+function Get-AppCommand($name) {
+  # Avoid PowerShell aliases like `curl`/`wget` that map to Invoke-WebRequest.
+  return Get-Command $name -All -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandType -eq "Application" } |
+    Select-Object -First 1
+}
+
+function Resolve-ExePath($exeName, $commandName) {
+  foreach ($p in @((Join-Path $InstallBinDir $exeName), (Join-Path $BinDir $exeName))) {
+    if ($p -and (Test-Path $p)) { return $p }
+  }
+  $cmdInfo = Get-AppCommand $commandName
+  if ($cmdInfo) { return $cmdInfo.Source }
+  return $null
+}
+
+function ConvertTo-Text($output) {
+  if ($null -eq $output) { return $null }
+  if ($output -is [array]) { return ($output -join "`n") }
+  return [string]$output
+}
+
+function Invoke-NativeOutput($exe, [string[]]$argv) {
+  if (-not $exe) { return $null }
+
+  $oldEap = $ErrorActionPreference
+  $hadNativePref = $false
+  $oldNativePref = $null
+  try {
+    if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+      $hadNativePref = $true
+      $oldNativePref = $PSNativeCommandUseErrorActionPreference
+      $PSNativeCommandUseErrorActionPreference = $false
+    }
+  } catch {
+    # ignore
+  }
+
+  $ErrorActionPreference = "Continue"
+  try {
+    $out = & $exe @argv 2>$null
+    return (ConvertTo-Text $out)
+  } catch {
+    return $null
+  } finally {
+    $ErrorActionPreference = $oldEap
+    if ($hadNativePref) {
+      try { $PSNativeCommandUseErrorActionPreference = $oldNativePref } catch {}
+    }
+  }
+}
+
 function Get-CommandVersion($cmd, $pattern) {
-  if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { return $null }
-  $output = & $cmd --version 2>$null
-  if ($output -match $pattern) { return $Matches[1] }
+  $cmdInfo = Get-AppCommand $cmd
+  if (-not $cmdInfo) { return $null }
+
+  $text = Invoke-NativeOutput $cmdInfo.Source @("--version")
+  if ($text -match $pattern) { return $Matches[1] }
+  return $null
+}
+
+function Get-KubectlVersion {
+  $exe = Resolve-ExePath "kubectl.exe" "kubectl"
+  if (-not $exe) { return $null }
+
+  $text = Invoke-NativeOutput $exe @("version","--client","-o","yaml")
+  if (-not $text) { return $null }
+
+  if ($text -match 'gitVersion:\s*(v?\d+\.\d+\.\d+)') { return $Matches[1] }
+  if ($text -match 'GitVersion:\"(v?\d+\.\d+\.\d+)\"') { return $Matches[1] }
+  return $null
+}
+
+function Get-KindVersion {
+  $exe = Resolve-ExePath "kind.exe" "kind"
+  if (-not $exe) { return $null }
+
+  $text = Invoke-NativeOutput $exe @("version")
+  if ($text -match '(v\d+\.\d+\.\d+)') { return $Matches[1] }
+  return $null
+}
+
+function Get-JqVersion {
+  $exe = Resolve-ExePath "jq.exe" "jq"
+  if (-not $exe) { return $null }
+
+  $text = Invoke-NativeOutput $exe @("--version")
+  if ($text -match 'jq-(\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Get-MkcertVersion {
-  if (-not (Get-Command mkcert -ErrorAction SilentlyContinue)) { return $null }
-  $output = & mkcert -version 2>$null
-  if ($output -match 'v?(\d+\.\d+\.\d+)') { return $Matches[1] }
+  $exe = Resolve-ExePath "mkcert.exe" "mkcert"
+  if (-not $exe) { return $null }
+  $text = Invoke-NativeOutput $exe @("-version")
+  if ($text -match 'v?(\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
@@ -181,11 +295,24 @@ function Version-Ge($current, $min) {
 }
 
 function Invoke-Download($url, $out, $retries = 3) {
+  $curlCmd = Get-AppCommand "curl"
+  if (-not $curlCmd) {
+    $curlPath = Join-Path $env:SystemRoot "System32\\curl.exe"
+    if (Test-Path $curlPath) { $curlCmd = [pscustomobject]@{ Source = $curlPath } }
+  }
   for ($i = 1; $i -le $retries; $i++) {
     Write-Host "download (attempt $i/$retries): $url"
     try {
-      Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing | Out-Null
-      if ((Get-Item $out).Length -gt 0) { return }
+      if ($curlCmd) {
+        & $curlCmd.Source --fail --location --silent --show-error --retry 3 --retry-delay 2 --output $out $url 2>$null | Out-Null
+      } else {
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing | Out-Null
+        } else {
+          Invoke-WebRequest -Uri $url -OutFile $out | Out-Null
+        }
+      }
+      if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { return }
     } catch {
       Write-Host "download failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
@@ -195,10 +322,21 @@ function Invoke-Download($url, $out, $retries = 3) {
   throw "bootstrap step failed"
 }
 
+function Invoke-DownloadOptional($url, $out) {
+  try {
+    Invoke-Download $url $out 1
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Verify-Sha256File($file, $checksumUrl) {
   $checksumFile = Join-Path $env:TEMP "checksum.txt"
   Invoke-Download $checksumUrl $checksumFile
-  $expected = (Get-Content $checksumFile | Select-Object -First 1).Split(" ")[0].Trim()
+  $raw = (Get-Content $checksumFile -Raw)
+  $expected = $null
+  if ($raw -match '([0-9a-fA-F]{64})') { $expected = $Matches[1] }
   if (-not $expected) {
     Write-Host "checksum not found at $checksumUrl" -ForegroundColor Red
     throw "bootstrap step failed"
@@ -212,11 +350,23 @@ function Verify-Sha256File($file, $checksumUrl) {
   }
 }
 
-function Verify-Sha256Checksums($file, $checksumsUrl) {
+function Verify-Sha256Checksums($file, $checksumsUrl, $assetName = $null) {
   $checksumFile = Join-Path $env:TEMP "checksums.txt"
   Invoke-Download $checksumsUrl $checksumFile
-  $filename = Split-Path $file -Leaf
-  $expected = (Select-String -Path $checksumFile -Pattern " $filename$" | Select-Object -First 1).Line.Split(" ")[0].Trim()
+  $filename = $assetName
+  if (-not $filename) { $filename = Split-Path $file -Leaf }
+
+  $expected = $null
+  foreach ($line in (Get-Content $checksumFile)) {
+    if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') {
+      $hash = $Matches[1]
+      $name = $Matches[2].Trim()
+      if ($name -eq $filename) {
+        $expected = $hash
+        break
+      }
+    }
+  }
   if (-not $expected) {
     Write-Host "checksum for $filename not found at $checksumsUrl" -ForegroundColor Red
     throw "bootstrap step failed"
@@ -267,100 +417,133 @@ function Install-Kind($version) {
 
 function Install-Jq($version) {
   $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
-  $exe = Join-Path $env:TEMP "jq.exe"
-  $url = "https://github.com/jqlang/jq/releases/download/jq-$version/jq-windows-$arch.exe"
-  $sha = "$url.sha256"
+  $checksums = "https://github.com/jqlang/jq/releases/download/jq-$version/sha256sum.txt"
+  $checksumsFile = Join-Path $env:TEMP "jq-sha256sum.txt"
+  Invoke-Download $checksums $checksumsFile
+
+  $asset = $null
+  foreach ($line in (Get-Content $checksumsFile)) {
+    if ($line -match "^[0-9a-fA-F]{64}\s+\*?(jq-windows-$arch(\.exe)?)\s*$") {
+      $asset = $Matches[1]
+      break
+    }
+  }
+  if (-not $asset) {
+    Write-Host "jq checksum entry not found for windows/$arch at $checksums" -ForegroundColor Red
+    throw "bootstrap step failed"
+  }
+
+  $exe = Join-Path $env:TEMP $asset
+  $url = "https://github.com/jqlang/jq/releases/download/jq-$version/$asset"
   Write-Host "installing jq $version"
   Invoke-Download $url $exe
-  Verify-Sha256File $exe $sha
+  Verify-Sha256Checksums $exe $checksums $asset
   Install-BinaryFile $exe "jq.exe"
 }
 
 function Install-Mkcert($version) {
   $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
-  $exe = Join-Path $env:TEMP "mkcert.exe"
+  $exe = Join-Path $env:TEMP "mkcert-v$version-windows-$arch.exe"
   $url = "https://github.com/FiloSottile/mkcert/releases/download/v$version/mkcert-v$version-windows-$arch.exe"
   $sha = "$url.sha256"
   Write-Host "installing mkcert $version"
   Invoke-Download $url $exe
-  Verify-Sha256File $exe $sha
+  if (Invoke-DownloadOptional $sha (Join-Path $env:TEMP "mkcert.sha256")) {
+    Verify-Sha256File $exe $sha
+  } else {
+    Write-Host "warning: mkcert release does not provide $sha; proceeding without checksum verification for this artifact" -ForegroundColor Yellow
+  }
   Install-BinaryFile $exe "mkcert.exe"
 }
 
 function Get-KustomizeVersion {
-  if (-not (Get-Command kustomize -ErrorAction SilentlyContinue)) { return $null }
-  $output = & kustomize version --short 2>$null
-  if ($output -match 'v?(\d+\.\d+\.\d+)') { return $Matches[1] }
+  $exe = Resolve-ExePath "kustomize.exe" "kustomize"
+  if (-not $exe) { return $null }
+  $text = Invoke-NativeOutput $exe @("version")
+  if ($text -match 'v?(\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Get-KubeconformVersion {
-  if (-not (Get-Command kubeconform -ErrorAction SilentlyContinue)) { return $null }
-  $output = & kubeconform -version 2>$null
-  if ($output -match 'v?(\d+\.\d+\.\d+)') { return $Matches[1] }
-  $output = & kubeconform --version 2>$null
-  if ($output -match 'v?(\d+\.\d+\.\d+)') { return $Matches[1] }
+  $exe = Resolve-ExePath "kubeconform.exe" "kubeconform"
+  if (-not $exe) { return $null }
+
+  # kubeconform prints version with `-v`.
+  $text = Invoke-NativeOutput $exe @("-v")
+  if ($text -match 'v?(\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Get-DockerVersion {
-  if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return $null }
-  $output = & docker version --format "{{.Server.Version}}" 2>$null
-  return (Normalize-Version $output)
+  $cmdInfo = Get-AppCommand "docker"
+  if (-not $cmdInfo) { return $null }
+  $text = Invoke-NativeOutput $cmdInfo.Source @("version","--format","{{.Server.Version}}")
+  return (Normalize-Version $text)
 }
 
 function Get-GitVersion {
-  if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $null }
-  $output = & git --version 2>$null
-  if ($output -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+  $cmdInfo = Get-AppCommand "git"
+  if (-not $cmdInfo) { return $null }
+  $text = Invoke-NativeOutput $cmdInfo.Source @("--version")
+  if ($text -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Get-MakeVersion {
-  if (-not (Get-Command make -ErrorAction SilentlyContinue)) { return $null }
-  $output = & make --version 2>$null
-  if ($output -match '(\d+\.\d+(\.\d+)?)') { return $Matches[1] }
+  $cmdInfo = Get-AppCommand "make"
+  if (-not $cmdInfo) { return $null }
+  $text = Invoke-NativeOutput $cmdInfo.Source @("--version")
+  if ($text -match '(\d+\.\d+(\.\d+)?)') { return $Matches[1] }
   return $null
 }
 
 function Get-PythonVersion {
-  if (-not (Get-Command python -ErrorAction SilentlyContinue)) { return $null }
-  $output = & python --version 2>$null
-  if ($output -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+  $cmdInfo = Get-AppCommand "python"
+  if (-not $cmdInfo) { return $null }
+  $text = Invoke-NativeOutput $cmdInfo.Source @("--version")
+  if ($text -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Get-OpenSSLVersion {
-  if (-not (Get-Command openssl -ErrorAction SilentlyContinue)) { return $null }
-  $output = & openssl version 2>$null
-  if ($output -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+  $cmdInfo = Get-AppCommand "openssl"
+  if (-not $cmdInfo) { return $null }
+  $text = Invoke-NativeOutput $cmdInfo.Source @("version")
+  if ($text -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Get-CurlVersion {
-  if (-not (Get-Command curl -ErrorAction SilentlyContinue)) { return $null }
-  $output = & curl --version 2>$null
-  if ($output -match 'curl (\d+\.\d+\.\d+)') { return $Matches[1] }
+  $exe = Resolve-ExePath "curl.exe" "curl"
+  if (-not $exe) {
+    $fallback = Join-Path $env:SystemRoot "System32\\curl.exe"
+    if (Test-Path $fallback) { $exe = $fallback }
+  }
+  if (-not $exe) { return $null }
+  $text = Invoke-NativeOutput $exe @("--version")
+  if ($text -match 'curl (\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Get-WgetVersion {
-  if (-not (Get-Command wget -ErrorAction SilentlyContinue)) { return $null }
-  $output = & wget --version 2>$null
-  if ($output -match 'GNU Wget (\d+\.\d+\.\d+)') { return $Matches[1] }
+  $cmdInfo = Get-AppCommand "wget"
+  if (-not $cmdInfo) { return $null }
+  $text = Invoke-NativeOutput $cmdInfo.Source @("--version")
+  if ($text -match 'GNU Wget (\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Get-UnzipVersion {
-  if (-not (Get-Command unzip -ErrorAction SilentlyContinue)) { return $null }
-  $output = & unzip -v 2>$null
-  if ($output -match 'UnZip (\d+\.\d+)') { return $Matches[1] }
+  $cmdInfo = Get-AppCommand "unzip"
+  if (-not $cmdInfo) { return $null }
+  $text = Invoke-NativeOutput $cmdInfo.Source @("-v")
+  if ($text -match 'UnZip (\d+\.\d+)') { return $Matches[1] }
   return $null
 }
 
 function Show-Version($name, $value) {
   if (-not $value) { $value = "not found" }
-  Write-Host ("{0,-12} {1}" -f "$name:", $value)
+  Write-Host ("{0,-12} {1}" -f "${name}:", $value)
 }
 
 function Measure-Block($name, [scriptblock]$block) {
@@ -378,6 +561,7 @@ function Run-Step($name, [scriptblock]$block) {
     $Summary[$name] = "FAIL"
     $script:HadFailure = $true
     Write-Host "$name failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-StepErrorDetails $_
   }
 }
 
@@ -396,6 +580,7 @@ function Run-SoftStep($name, [scriptblock]$block) {
     $Summary[$name] = "FAIL"
     $script:HadFailure = $true
     Write-Host "$name failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-StepErrorDetails $_
   } finally {
     $sw.Stop()
     Write-Host "$name took $([math]::Round($sw.Elapsed.TotalSeconds, 1))s"
@@ -403,23 +588,28 @@ function Run-SoftStep($name, [scriptblock]$block) {
 }
 
 function Get-CurrentKubeContext {
-  if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) { return $null }
-  $ctx = & kubectl config current-context 2>$null
-  if ($LASTEXITCODE -ne 0) { return $null }
+  $exe = Resolve-ExePath "kubectl.exe" "kubectl"
+  if (-not $exe) { return $null }
+  $ctx = Invoke-NativeOutput $exe @("config","current-context")
+  if (-not $ctx) { return $null }
+  $ctx = $ctx.Trim()
+  if (-not $ctx) { return $null }
   return $ctx
 }
 
 function Ensure-KubeContext($expected, $autoSwitch) {
-  if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+  $exe = Resolve-ExePath "kubectl.exe" "kubectl"
+  if (-not $exe) {
     Write-Host "kubectl not found; skipping kube context validation" -ForegroundColor Yellow
     return "WARN"
   }
 
-  $contexts = & kubectl config get-contexts -o name 2>$null
-  if ($LASTEXITCODE -ne 0 -or -not $contexts) {
+  $contextsText = Invoke-NativeOutput $exe @("config","get-contexts","-o","name")
+  if (-not $contextsText) {
     Write-Host "unable to read kube contexts from kubectl config" -ForegroundColor Yellow
     return "WARN"
   }
+  $contexts = $contextsText.Split("`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
   if (-not ($contexts -contains $expected)) {
     Write-Host "kube context $expected not found yet" -ForegroundColor Yellow
@@ -435,8 +625,8 @@ function Ensure-KubeContext($expected, $autoSwitch) {
 
   if (Test-Truthy $autoSwitch) {
     Write-Host "switching kube context to $expected"
-    & kubectl config use-context $expected | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    $null = Invoke-NativeOutput $exe @("config","use-context",$expected)
+    if ((Get-CurrentKubeContext) -eq $expected) {
       Write-Host "kube context switched to $expected"
       return "OK"
     }
@@ -471,10 +661,10 @@ function Invoke-WingetInstall($id, $desiredVersion = $null, $retries = 3) {
   for ($i = 1; $i -le $retries; $i++) {
     if ($desiredVersion) {
       Write-Host "winget install (attempt $i/$retries): $id $desiredVersion"
-      $result = winget install -e --id $id --version $desiredVersion
+      winget install -e --id $id --version $desiredVersion --accept-source-agreements --accept-package-agreements
     } else {
       Write-Host "winget install (attempt $i/$retries): $id"
-      $result = winget install -e --id $id
+      winget install -e --id $id --accept-source-agreements --accept-package-agreements
     }
     if ($LASTEXITCODE -eq 0) { return }
     Write-Host "winget install failed ($i/$retries). Retrying..." -ForegroundColor Yellow
@@ -488,7 +678,8 @@ function Invoke-WingetInstallAny($name, $ids, $desiredVersion = $null) {
   foreach ($id in $ids) {
     try {
       Invoke-WingetInstall $id $desiredVersion
-      $WingetUsed[$name] = $id
+      if (-not $script:WingetUsed) { $script:WingetUsed = [ordered]@{} }
+      $script:WingetUsed[$name] = $id
       return $id
     } catch {
       Write-Host "winget install failed for $id; trying next candidate..." -ForegroundColor Yellow
@@ -498,7 +689,8 @@ function Invoke-WingetInstallAny($name, $ids, $desiredVersion = $null) {
     foreach ($id in $ids) {
       try {
         Invoke-WingetInstall $id
-        $WingetUsed[$name] = $id
+        if (-not $script:WingetUsed) { $script:WingetUsed = [ordered]@{} }
+        $script:WingetUsed[$name] = $id
         return $id
       } catch {
         Write-Host "winget install (no version) failed for $id; trying next candidate..." -ForegroundColor Yellow
@@ -512,7 +704,7 @@ function Invoke-WingetInstallAny($name, $ids, $desiredVersion = $null) {
 function Invoke-WingetUninstall($id, $retries = 3) {
   for ($i = 1; $i -le $retries; $i++) {
     Write-Host "winget uninstall (attempt $i/$retries): $id"
-    $result = winget uninstall -e --id $id
+    winget uninstall -e --id $id
     if ($LASTEXITCODE -eq 0) { return }
     Write-Host "winget uninstall failed ($i/$retries). Retrying..." -ForegroundColor Yellow
     Start-Sleep -Seconds (2 * $i)
@@ -554,66 +746,66 @@ function Ensure-WingetPackage($id, $name, $desiredVersion, $versionPattern, $cmd
 function Ensure-Git($version) {
   $current = Get-GitVersion
   if ($current) { Write-Host "git detected: $current (desired: $version)" } else { Write-Host "git detected: not found (desired: $version)" }
-  if ($current -eq $version) { Write-Host "git $current already installed"; return }
+  if ($current -and (Version-Ge $current $version)) { Write-Host "git $current OK (>= $version)"; return }
   if ($current) { Should-Reinstall "git" $current $version | Out-Null }
   Invoke-WingetInstallAny "git" @("Git.Git","GitHub.GitHubDesktop") $version | Out-Null
   $current = Get-GitVersion
-  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: git version is $current, expected >= $version" -ForegroundColor Red; throw }
+  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: git version is $current, expected >= $version" -ForegroundColor Red; throw "bootstrap step failed" }
   Write-Host "git installed: $current"
 }
 
 function Ensure-Make($version) {
   $current = Get-MakeVersion
   if ($current) { Write-Host "make detected: $current (desired: $version)" } else { Write-Host "make detected: not found (desired: $version)" }
-  if ($current -eq $version) { Write-Host "make $current already installed"; return }
+  if ($current -and (Version-Ge $current $version)) { Write-Host "make $current OK (>= $version)"; return }
   if ($current) { Should-Reinstall "make" $current $version | Out-Null }
   Invoke-WingetInstallAny "make" @("GnuWin32.Make","GnuWin.Make","MSYS2.MSYS2") $version | Out-Null
   $current = Get-MakeVersion
-  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: make version is $current, expected >= $version" -ForegroundColor Red; throw }
+  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: make version is $current, expected >= $version" -ForegroundColor Red; throw "bootstrap step failed" }
   Write-Host "make installed: $current"
 }
 
 function Ensure-Python($version) {
   $current = Get-PythonVersion
   if ($current) { Write-Host "python detected: $current (desired: $version)" } else { Write-Host "python detected: not found (desired: $version)" }
-  if ($current -eq $version) { Write-Host "python $current already installed"; return }
+  if ($current -and (Version-Ge $current $version)) { Write-Host "python $current OK (>= $version)"; return }
   if ($current) { Should-Reinstall "python" $current $version | Out-Null }
   Invoke-WingetInstallAny "python" @("Python.Python.3.14","Python.Python.3") $version | Out-Null
   $current = Get-PythonVersion
-  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: python version is $current, expected >= $version" -ForegroundColor Red; throw }
+  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: python version is $current, expected >= $version" -ForegroundColor Red; throw "bootstrap step failed" }
   Write-Host "python installed: $current"
 }
 
 function Ensure-OpenSSL($version) {
   $current = Get-OpenSSLVersion
   if ($current) { Write-Host "openssl detected: $current (desired: $version)" } else { Write-Host "openssl detected: not found (desired: $version)" }
-  if ($current -eq $version) { Write-Host "openssl $current already installed"; return }
+  if ($current -and (Version-Ge $current $version)) { Write-Host "openssl $current OK (>= $version)"; return }
   if ($current) { Should-Reinstall "openssl" $current $version | Out-Null }
   Invoke-WingetInstallAny "openssl" @("OpenSSL.OpenSSL","ShiningLight.OpenSSL") | Out-Null
   $current = Get-OpenSSLVersion
-  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: openssl version is $current, expected >= $version" -ForegroundColor Red; throw }
+  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: openssl version is $current, expected >= $version" -ForegroundColor Red; throw "bootstrap step failed" }
   Write-Host "openssl installed: $current"
 }
 
 function Ensure-Curl($version) {
   $current = Get-CurlVersion
   if ($current) { Write-Host "curl detected: $current (desired: $version)" } else { Write-Host "curl detected: not found (desired: $version)" }
-  if ($current -eq $version) { Write-Host "curl $current already installed"; return }
+  if ($current -and (Version-Ge $current $version)) { Write-Host "curl $current OK (>= $version)"; return }
   if ($current) { Should-Reinstall "curl" $current $version | Out-Null }
   Invoke-WingetInstallAny "curl" @("cURL.cURL") | Out-Null
   $current = Get-CurlVersion
-  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: curl version is $current, expected >= $version" -ForegroundColor Red; throw }
+  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: curl version is $current, expected >= $version" -ForegroundColor Red; throw "bootstrap step failed" }
   Write-Host "curl installed: $current"
 }
 
 function Ensure-Wget($version) {
   $current = Get-WgetVersion
   if ($current) { Write-Host "wget detected: $current (desired: $version)" } else { Write-Host "wget detected: not found (desired: $version)" }
-  if ($current -eq $version) { Write-Host "wget $current already installed"; return }
+  if ($current -and (Version-Ge $current $version)) { Write-Host "wget $current OK (>= $version)"; return }
   if ($current) { Should-Reinstall "wget" $current $version | Out-Null }
   Invoke-WingetInstallAny "wget" @("GnuWin32.Wget","JernejSimoncic.Wget") | Out-Null
   $current = Get-WgetVersion
-  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: wget version is $current, expected >= $version" -ForegroundColor Red; throw }
+  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: wget version is $current, expected >= $version" -ForegroundColor Red; throw "bootstrap step failed" }
   Write-Host "wget installed: $current"
 }
 
@@ -630,12 +822,12 @@ function Ensure-Unzip($version) {
       $current = "7zip"
     }
   }
-  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: unzip version is $current, expected >= $version" -ForegroundColor Red; throw }
+  if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: unzip version is $current, expected >= $version" -ForegroundColor Red; throw "bootstrap step failed" }
   Write-Host "unzip installed: $current"
 }
 
 function Ensure-Kubectl($version) {
-  $current = Get-CommandVersion "kubectl" 'v(\d+\.\d+\.\d+)'
+  $current = Get-KubectlVersion
   if ($current) {
     Write-Host "kubectl detected: $current (desired: $version)"
   } else {
@@ -645,10 +837,10 @@ function Ensure-Kubectl($version) {
     Write-Host "kubectl $current already installed"
     return
   }
-  if ($current) { Should-Reinstall "kubectl" $current $version | Out-Null }
+  if ($current) { Write-Host "installing pinned kubectl $version into $InstallBinDir (existing: $current)" }
   Install-Kubectl $version
   $WingetUsed["kubectl"] = "direct"
-  $current = Get-CommandVersion "kubectl" 'v(\d+\.\d+\.\d+)'
+  $current = Get-KubectlVersion
   if ($current -ne $version) {
     Write-Host "Error: kubectl version is $current, expected $version" -ForegroundColor Red
     throw "bootstrap step failed"
@@ -657,7 +849,7 @@ function Ensure-Kubectl($version) {
 }
 
 function Ensure-Kind($version) {
-  $current = Get-CommandVersion "kind" 'v(\d+\.\d+\.\d+)'
+  $current = Get-KindVersion
   if ($current) {
     Write-Host "kind detected: $current (desired: $version)"
   } else {
@@ -667,10 +859,10 @@ function Ensure-Kind($version) {
     Write-Host "kind $current already installed"
     return
   }
-  if ($current) { Should-Reinstall "kind" $current $version | Out-Null }
+  if ($current) { Write-Host "installing pinned kind $version into $InstallBinDir (existing: $current)" }
   Install-Kind $version
   $WingetUsed["kind"] = "direct"
-  $current = Get-CommandVersion "kind" 'v(\d+\.\d+\.\d+)'
+  $current = Get-KindVersion
   if ($current -ne $version) {
     Write-Host "Error: kind version is $current, expected $version" -ForegroundColor Red
     throw "bootstrap step failed"
@@ -679,7 +871,7 @@ function Ensure-Kind($version) {
 }
 
 function Ensure-Jq($version) {
-  $current = Get-CommandVersion "jq" 'jq-(\d+\.\d+\.\d+)'
+  $current = Get-JqVersion
   if ($current) {
     Write-Host "jq detected: $current (desired: $version)"
   } else {
@@ -689,10 +881,10 @@ function Ensure-Jq($version) {
     Write-Host "jq $current already installed"
     return
   }
-  if ($current) { Should-Reinstall "jq" $current $version | Out-Null }
+  if ($current) { Write-Host "installing pinned jq $version into $InstallBinDir (existing: $current)" }
   Install-Jq $version
   $WingetUsed["jq"] = "direct"
-  $current = Get-CommandVersion "jq" 'jq-(\d+\.\d+\.\d+)'
+  $current = Get-JqVersion
   if ($current -ne $version) {
     Write-Host "Error: jq version is $current, expected $version" -ForegroundColor Red
     throw "bootstrap step failed"
@@ -701,6 +893,7 @@ function Ensure-Jq($version) {
 }
 
 function Ensure-Mkcert($version) {
+  $exe = Resolve-ExePath "mkcert.exe" "mkcert"
   $current = Get-MkcertVersion
   if ($current) {
     Write-Host "mkcert detected: $current (desired: $version)"
@@ -710,7 +903,7 @@ function Ensure-Mkcert($version) {
   if ($current -eq $version) {
     Write-Host "mkcert $current already installed"
   } else {
-    if ($current) { Should-Reinstall "mkcert" $current $version | Out-Null }
+    if ($current) { Write-Host "installing pinned mkcert $version into $InstallBinDir (existing: $current)" }
     Install-Mkcert $version
     $WingetUsed["mkcert"] = "direct"
     $current = Get-MkcertVersion
@@ -720,11 +913,14 @@ function Ensure-Mkcert($version) {
     }
     Write-Host "mkcert installed: $current"
   }
-  $caroot = & mkcert -CAROOT 2>$null
+  if (-not $exe) { $exe = Resolve-ExePath "mkcert.exe" "mkcert" }
+  $caroot = Invoke-NativeOutput $exe @("-CAROOT")
+  if ($caroot) { $caroot = $caroot.Trim() }
   if (-not $caroot -or -not (Test-Path (Join-Path $caroot "rootCA.pem"))) {
     Write-Host "mkcert found, but CA not installed; running mkcert -install"
-    & mkcert -install | Out-Null
-    $caroot = & mkcert -CAROOT 2>$null
+    $null = Invoke-NativeOutput $exe @("-install")
+    $caroot = Invoke-NativeOutput $exe @("-CAROOT")
+    if ($caroot) { $caroot = $caroot.Trim() }
     if (-not $caroot -or -not (Test-Path (Join-Path $caroot "rootCA.pem"))) {
       Write-Host "Error: mkcert CA install failed. Fix manually and re-run." -ForegroundColor Red
       throw "bootstrap step failed"
@@ -734,12 +930,13 @@ function Ensure-Mkcert($version) {
 
 function Install-Kustomize($version) {
   $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
-  $zip = Join-Path $env:TEMP "kustomize.zip"
-  $url = "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v$version/kustomize_v$version`_windows_$arch.zip"
+  $archiveName = "kustomize_v${version}_windows_${arch}.zip"
+  $zip = Join-Path $env:TEMP $archiveName
+  $url = "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v$version/$archiveName"
   $checksums = "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v$version/checksums.txt"
   Write-Host "installing kustomize $version"
   Invoke-Download $url $zip
-  Verify-Sha256Checksums $zip $checksums
+  Verify-Sha256Checksums $zip $checksums $archiveName
   $tmp = Join-Path $env:TEMP "kustomize_extract"
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
   Expand-Archive -Path $zip -DestinationPath $tmp -Force
@@ -748,12 +945,13 @@ function Install-Kustomize($version) {
 
 function Install-Kubeconform($version) {
   $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "amd64" }
-  $zip = Join-Path $env:TEMP "kubeconform.zip"
-  $url = "https://github.com/yannh/kubeconform/releases/download/v$version/kubeconform-windows-$arch.zip"
-  $checksums = "https://github.com/yannh/kubeconform/releases/download/v$version/checksums.txt"
+  $archiveName = "kubeconform-windows-$arch.zip"
+  $zip = Join-Path $env:TEMP $archiveName
+  $url = "https://github.com/yannh/kubeconform/releases/download/v$version/$archiveName"
+  $checksums = "https://github.com/yannh/kubeconform/releases/download/v$version/CHECKSUMS"
   Write-Host "installing kubeconform $version"
   Invoke-Download $url $zip
-  Verify-Sha256Checksums $zip $checksums
+  Verify-Sha256Checksums $zip $checksums $archiveName
   $tmp = Join-Path $env:TEMP "kubeconform_extract"
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
   Expand-Archive -Path $zip -DestinationPath $tmp -Force
@@ -771,9 +969,7 @@ function Ensure-Kustomize($version) {
     Write-Host "kustomize $current already installed"
     return
   }
-  if ($current) {
-    Should-Reinstall "kustomize" $current $version | Out-Null
-  }
+  if ($current) { Write-Host "installing pinned kustomize $version into $InstallBinDir (existing: $current)" }
   Install-Kustomize $version
   $current = Get-KustomizeVersion
   if ($current -ne $version) {
@@ -794,9 +990,7 @@ function Ensure-Kubeconform($version) {
     Write-Host "kubeconform $current already installed"
     return
   }
-  if ($current) {
-    Should-Reinstall "kubeconform" $current $version | Out-Null
-  }
+  if ($current) { Write-Host "installing pinned kubeconform $version into $InstallBinDir (existing: $current)" }
   Install-Kubeconform $version
   $current = Get-KubeconformVersion
   if ($current -ne $version) {
@@ -809,23 +1003,87 @@ function Ensure-Kubeconform($version) {
 try {
   $Summary["apt-system"] = "WARN"
   Run-Step "network-tools" { Write-Host "Windows bootstrap does not use apt; validating network tools directly." }
-  Run-Step "curl" { Ensure-Curl $curlMinVersion }
-  Run-Step "wget" { Ensure-Wget $wgetMinVersion }
-  Run-Step "unzip" { Ensure-Unzip $unzipMinVersion }
-  Run-Step "git" { Ensure-Git $gitVersion }
-  Run-Step "make" { Ensure-Make $makeVersion }
-  Run-Step "python3" { Ensure-Python $pythonVersion }
-  Run-Step "openssl" { Ensure-OpenSSL $opensslMinVersion }
+
+  # Windows 11 already ships with curl.exe; treat wget/unzip/make/python/openssl as optional.
+  Run-SoftStep "curl" {
+    $current = Get-CurlVersion
+    if ($current -and (Version-Ge $current $curlMinVersion)) { Write-Host "curl OK: $current"; return "OK" }
+    Write-Host "curl not found or too old. Windows 11 normally includes curl.exe; install/update it and re-run." -ForegroundColor Yellow
+    return "WARN"
+  }
+
+  Run-SoftStep "wget" {
+    $current = Get-WgetVersion
+    if ($current -and (Version-Ge $current $wgetMinVersion)) { Write-Host "wget OK: $current"; return "OK" }
+    Write-Host "wget not found (optional on Windows; bootstrap uses curl.exe for downloads)." -ForegroundColor Yellow
+    return "WARN"
+  }
+
+  Run-SoftStep "unzip" {
+    $current = Get-UnzipVersion
+    if ($current -and (Version-Ge $current $unzipMinVersion)) { Write-Host "unzip OK: $current"; return "OK" }
+    Write-Host "unzip not found (optional on Windows; bootstrap uses Expand-Archive for .zip)." -ForegroundColor Yellow
+    return "WARN"
+  }
+
+  Run-SoftStep "git" {
+    $current = Get-GitVersion
+    if ($current -and (Version-Ge $current $gitVersion)) { Write-Host "git OK: $current"; return "OK" }
+    Write-Host "git not found (or too old). Install Git for Windows and re-run." -ForegroundColor Yellow
+    return "WARN"
+  }
+
+  Run-SoftStep "make" {
+    $current = Get-MakeVersion
+    if ($current -and (Version-Ge $current $makeVersion)) { Write-Host "make OK: $current"; return "OK" }
+    Write-Host "make not found (optional). On Windows, run repo commands from Git Bash or WSL2, which provide a POSIX shell + make." -ForegroundColor Yellow
+    return "WARN"
+  }
+
+  Run-SoftStep "python3" {
+    $current = Get-PythonVersion
+    if ($current -and (Version-Ge $current $pythonVersion)) { Write-Host "python OK: $current"; return "OK" }
+    Write-Host "python not found (optional). Install Python from python.org or via winget, then re-run." -ForegroundColor Yellow
+    return "WARN"
+  }
+
+  Run-SoftStep "openssl" {
+    $current = Get-OpenSSLVersion
+    if ($current -and (Version-Ge $current $opensslMinVersion)) { Write-Host "openssl OK: $current"; return "OK" }
+    Write-Host "openssl not found (optional). Install OpenSSL if you need it, then re-run." -ForegroundColor Yellow
+    return "WARN"
+  }
+
   Run-Step "kubectl" { Ensure-Kubectl $kubectlVersion }
   Run-Step "kind" { Ensure-Kind $kindVersion }
   Run-SoftStep "kube-context" { Ensure-KubeContext $bootstrapExpectedKubeContext $bootstrapAutoKubeContext }
   Run-Step "jq" { Ensure-Jq $jqVersion }
-  Run-Step "kustomize" { Ensure-Kustomize $kustomizeVersion }
-  Run-Step "kubeconform" { Ensure-Kubeconform $kubeconformVersion }
+
+  Run-SoftStep "kustomize" {
+    try {
+      Ensure-Kustomize $kustomizeVersion
+      return "OK"
+    } catch {
+      Write-Host "kustomize not available (optional): $($_.Exception.Message)" -ForegroundColor Yellow
+      return "WARN"
+    }
+  }
+
+  Run-SoftStep "kubeconform" {
+    try {
+      Ensure-Kubeconform $kubeconformVersion
+      return "OK"
+    } catch {
+      Write-Host "kubeconform not available (optional): $($_.Exception.Message)" -ForegroundColor Yellow
+      return "WARN"
+    }
+  }
 
 function Wait-Docker($retries = 30, $delay = 2) {
+  $exe = Resolve-ExePath "docker.exe" "docker"
+  if (-not $exe) { return $false }
   for ($i = 1; $i -le $retries; $i++) {
-    docker info | Out-Null
+    $null = Invoke-NativeOutput $exe @("info")
     if ($LASTEXITCODE -eq 0) { return $true }
     Start-Sleep -Seconds $delay
   }
@@ -854,50 +1112,65 @@ function Start-DockerDesktop {
   }
 }
 
-  Run-Step "docker" {
-    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-      Write-Host "Error: docker not found. Install Docker Desktop and re-run." -ForegroundColor Red
-      throw "bootstrap step failed"
+  Run-SoftStep "docker" {
+    $dockerCmd = Get-AppCommand "docker"
+    if (-not $dockerCmd) {
+      $dockerInstaller = Join-Path $PSScriptRoot "install-docker.cmd"
+      Write-Host "docker not found. Docker Desktop is required to run kind-based local dev." -ForegroundColor Yellow
+      if (Test-Path $dockerInstaller) {
+        Write-Host "Install automatically (Windows): $dockerInstaller" -ForegroundColor Yellow
+      }
+      return "WARN"
     }
-    docker info | Out-Null
+
+    $null = Invoke-NativeOutput $dockerCmd.Source @("info")
     if ($LASTEXITCODE -ne 0) {
       Write-Host "docker not running; attempting to start..."
       Start-DockerDesktop
       Write-Host "waiting for docker to be ready..."
       if (-not (Wait-Docker)) {
-        Write-Host "Error: docker daemon not running. Start Docker Desktop and re-run." -ForegroundColor Red
-        throw "bootstrap step failed"
+        Write-Host "docker daemon not running. Start Docker Desktop and re-run." -ForegroundColor Yellow
+        return "WARN"
       }
     }
+
     $dockerVersion = Get-DockerVersion
     Write-Host "docker detected: $dockerVersion (min: $dockerEngineMinVersion)"
     if ($dockerVersion -and -not (Version-Ge $dockerVersion $dockerEngineMinVersion)) {
-      Should-Reinstall "docker" $dockerVersion $dockerEngineMinVersion | Out-Null
-      Write-Host "Please update Docker Engine/Desktop to at least $dockerEngineMinVersion and re-run." -ForegroundColor Red
-      throw "bootstrap step failed"
+      Write-Host "docker version is below the recommended minimum ($dockerEngineMinVersion). Please update Docker Desktop and re-run." -ForegroundColor Yellow
+      return "WARN"
     }
-    $desktopExe = "$Env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+
+    $desktopExe = "$Env:ProgramFiles\\Docker\\Docker\\Docker Desktop.exe"
     if (Test-Path $desktopExe) {
       $desktopVersion = (Get-Item $desktopExe).VersionInfo.ProductVersion
       Write-Host "docker desktop detected: $desktopVersion (min: $dockerDesktopMinVersion)"
       if (-not (Version-Ge $desktopVersion $dockerDesktopMinVersion)) {
-        Should-Reinstall "docker desktop" $desktopVersion $dockerDesktopMinVersion | Out-Null
-        Write-Host "Please update Docker Desktop to at least $dockerDesktopMinVersion and re-run." -ForegroundColor Red
-        throw "bootstrap step failed"
+        Write-Host "docker desktop version is below the recommended minimum ($dockerDesktopMinVersion). Please update and re-run." -ForegroundColor Yellow
+        return "WARN"
       }
     }
+
     Write-Host "docker running"
+    return "OK"
   }
 
-  Run-Step "mkcert" { Ensure-Mkcert $mkcertVersion }
-  Write-Host "mkcert found (CA installed)"
+  Run-SoftStep "mkcert" {
+    try {
+      Ensure-Mkcert $mkcertVersion
+      return "OK"
+    } catch {
+      Write-Host "mkcert not available (optional): $($_.Exception.Message)" -ForegroundColor Yellow
+      return "WARN"
+    }
+  }
 
   Write-Host "Final versions:"
-  Show-Version "kubectl" (Get-CommandVersion 'kubectl' 'v(\d+\.\d+\.\d+)')
-  Show-Version "kind" (Get-CommandVersion 'kind' 'v(\d+\.\d+\.\d+)')
+  Show-Version "kubectl" (Get-KubectlVersion)
+  Show-Version "kind" (Get-KindVersion)
   Show-Version "kube-context" (Get-CurrentKubeContext)
   Show-Version "kube-context expected" $bootstrapExpectedKubeContext
-  Show-Version "jq" (Get-CommandVersion 'jq' 'jq-(\d+\.\d+\.\d+)')
+  Show-Version "jq" (Get-JqVersion)
   Show-Version "mkcert" (Get-MkcertVersion)
   Show-Version "kustomize" (Get-KustomizeVersion)
   Show-Version "kubeconform" (Get-KubeconformVersion)

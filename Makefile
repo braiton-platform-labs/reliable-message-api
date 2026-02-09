@@ -74,12 +74,22 @@ doctor:
 # Lightweight bootstrap for onboarding: installs pinned binaries into ./bin without changing sysctl
 # or running apt maintenance (no sudo required for most machines).
 bootstrap:
-	@BOOTSTRAP_INSTALL_MODE=local \
-	  BOOTSTRAP_ENFORCE_GLOBAL_BIN=0 \
-	  BOOTSTRAP_APT_MAINTENANCE=0 \
-	  BOOTSTRAP_TUNE_SYSCTL=0 \
-	  BOOTSTRAP_SYSCTL_PERSIST=0 \
-	  ./hack/bootstrap.sh
+	@set -e; \
+	if [ "$(EXE)" = ".exe" ]; then \
+	  BOOTSTRAP_INSTALL_MODE=local \
+	    BOOTSTRAP_ENFORCE_GLOBAL_BIN=0 \
+	    BOOTSTRAP_APT_MAINTENANCE=0 \
+	    BOOTSTRAP_TUNE_SYSCTL=0 \
+	    BOOTSTRAP_SYSCTL_PERSIST=0 \
+	    cmd.exe /c hack\\bootstrap.cmd; \
+	else \
+	  BOOTSTRAP_INSTALL_MODE=local \
+	    BOOTSTRAP_ENFORCE_GLOBAL_BIN=0 \
+	    BOOTSTRAP_APT_MAINTENANCE=0 \
+	    BOOTSTRAP_TUNE_SYSCTL=0 \
+	    BOOTSTRAP_SYSCTL_PERSIST=0 \
+	    ./hack/bootstrap.sh; \
+	fi
 
 # Full bootstrap (may require sudo and may tune sysctl for kind stability).
 bootstrap-full:
