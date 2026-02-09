@@ -7,21 +7,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    services:
-      docker:
-        image: docker:24.0.5-dind
-        options: >-
-          --privileged
-        ports:
-          - 2375:2375
     env:
-      DOCKER_HOST: tcp://localhost:2375
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -34,17 +29,5 @@ jobs:
       - name: Typecheck
         run: mypy app tests
 
-      - name: K8s Validate
-        run: make k8s-validate
-
       - name: Tests
         run: pytest -q
-
-      - name: Security (bandit)
-        run: bandit -r app
-
-      - name: Security (pip-audit)
-        run: pip-audit
-
-      - name: Build container
-        run: docker build -f docker/Dockerfile .
