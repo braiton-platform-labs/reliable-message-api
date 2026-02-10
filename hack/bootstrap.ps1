@@ -498,9 +498,14 @@ function Get-MakeVersion {
 }
 
 function Get-PythonVersion {
-  $cmdInfo = Get-AppCommand "python"
+  $cmdInfo = Get-Command "python" -All -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandType -eq "Application" } |
+    Where-Object { $_.Source -and ($_.Source -notmatch '\\Microsoft\\WindowsApps\\python(3)?\\.exe$') } |
+    Select-Object -First 1
   if (-not $cmdInfo) { return $null }
-  $text = Invoke-NativeOutput $cmdInfo.Source @("--version")
+
+  # Avoid `python --version`/`-V` stderr quirks; print a clean version to stdout.
+  $text = Invoke-NativeOutput $cmdInfo.Source @("-c","import sys; print('.'.join(map(str, sys.version_info[:3])))")
   if ($text -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
   return $null
 }
@@ -657,15 +662,26 @@ function Should-Reinstall($name, $current, $desired) {
   throw "bootstrap step failed"
 }
 
-function Invoke-WingetInstall($id, $desiredVersion = $null, $retries = 3) {
+function Invoke-WingetInstall($id, $desiredVersion = $null, $retries = 3, [string]$scope = $null) {
   for ($i = 1; $i -le $retries; $i++) {
+    $args = @(
+      "install",
+      "-e",
+      "--id", $id,
+      "--accept-source-agreements",
+      "--accept-package-agreements",
+      "--silent",
+      "--disable-interactivity"
+    )
+    if ($desiredVersion) { $args += @("--version", $desiredVersion) }
+    if ($scope) { $args += @("--scope", $scope) }
+
     if ($desiredVersion) {
       Write-Host "winget install (attempt $i/$retries): $id $desiredVersion"
-      winget install -e --id $id --version $desiredVersion --accept-source-agreements --accept-package-agreements
     } else {
       Write-Host "winget install (attempt $i/$retries): $id"
-      winget install -e --id $id --accept-source-agreements --accept-package-agreements
     }
+    winget @args
     if ($LASTEXITCODE -eq 0) { return }
     Write-Host "winget install failed ($i/$retries). Retrying..." -ForegroundColor Yellow
     Start-Sleep -Seconds (2 * $i)
@@ -674,10 +690,10 @@ function Invoke-WingetInstall($id, $desiredVersion = $null, $retries = 3) {
   throw "bootstrap step failed"
 }
 
-function Invoke-WingetInstallAny($name, $ids, $desiredVersion = $null) {
+function Invoke-WingetInstallAny($name, $ids, $desiredVersion = $null, [string]$scope = $null) {
   foreach ($id in $ids) {
     try {
-      Invoke-WingetInstall $id $desiredVersion
+      Invoke-WingetInstall $id $desiredVersion 3 $scope
       if (-not $script:WingetUsed) { $script:WingetUsed = [ordered]@{} }
       $script:WingetUsed[$name] = $id
       return $id
@@ -688,7 +704,7 @@ function Invoke-WingetInstallAny($name, $ids, $desiredVersion = $null) {
   if ($desiredVersion) {
     foreach ($id in $ids) {
       try {
-        Invoke-WingetInstall $id
+        Invoke-WingetInstall $id $null 3 $scope
         if (-not $script:WingetUsed) { $script:WingetUsed = [ordered]@{} }
         $script:WingetUsed[$name] = $id
         return $id
@@ -704,8 +720,9 @@ function Invoke-WingetInstallAny($name, $ids, $desiredVersion = $null) {
 function Invoke-WingetUninstall($id, $retries = 3) {
   for ($i = 1; $i -le $retries; $i++) {
     Write-Host "winget uninstall (attempt $i/$retries): $id"
-    winget uninstall -e --id $id
+    $out = winget uninstall -e --id $id --silent --force --accept-source-agreements --disable-interactivity 2>&1
     if ($LASTEXITCODE -eq 0) { return }
+    if ($out -match "No installed package found") { return }
     Write-Host "winget uninstall failed ($i/$retries). Retrying..." -ForegroundColor Yellow
     Start-Sleep -Seconds (2 * $i)
   }
@@ -770,7 +787,9 @@ function Ensure-Python($version) {
   if ($current) { Write-Host "python detected: $current (desired: $version)" } else { Write-Host "python detected: not found (desired: $version)" }
   if ($current -and (Version-Ge $current $version)) { Write-Host "python $current OK (>= $version)"; return }
   if ($current) { Should-Reinstall "python" $current $version | Out-Null }
-  Invoke-WingetInstallAny "python" @("Python.Python.3.14","Python.Python.3") $version | Out-Null
+
+  # Install in user scope (no UAC) and avoid the Microsoft Store "python.exe" stub.
+  Invoke-WingetInstallAny "python" @("Python.Python.3.14","Python.Python.3.13","Python.Python.3.12") $version "user" | Out-Null
   $current = Get-PythonVersion
   if (-not $current -or -not (Version-Ge $current $version)) { Write-Host "Error: python version is $current, expected >= $version" -ForegroundColor Red; throw "bootstrap step failed" }
   Write-Host "python installed: $current"

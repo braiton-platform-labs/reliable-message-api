@@ -14,4 +14,5 @@ htmlcov/
 .DS_Store
 bin/
 hack/certs/
+hack/.state/
 k8s/overlays/dev/kong/ip-whitelist.yaml

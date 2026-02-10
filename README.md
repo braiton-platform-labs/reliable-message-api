@@ -202,6 +202,28 @@ Opcional:
 - `.\hack\install-docker.cmd -AutoReboot` (reboot automático se precisar)
 - `.\hack\install-docker.cmd -WaitSeconds 300` (espera mais tempo pelo daemon)
 
+WSL2 (somente) + distro (default: Ubuntu-22.04):
+
+`.\hack\install-wsl2.cmd`
+
+Python (Windows, via `winget`, 100% silencioso/sem Windows Store UI):
+
+`.\hack\install-python.cmd`
+
+Abrir um shell WSL no diretorio do repo:
+
+`.\hack\wsl-here.cmd`
+
+One-shot (Windows) para preparar e validar o ambiente:
+
+- Instalar tudo (WSL2 + Docker Desktop + Python + hosts + bootstrap no WSL + `make dev`): `.\hack\install-all.cmd`
+- Pular Python: `.\hack\install-all.cmd -SkipPython`
+- Desabilitar reboot automático (se preferir controlar manualmente): `.\hack\install-all.cmd -NoAutoReboot`
+- (Alternativa) Usar o orquestrador detalhado: `.\hack\dev-env.cmd install`
+- Desinstalar artefatos do repo (kind/arquivos/hosts) e manter Docker/WSL: `.\hack\dev-env.cmd uninstall`
+- Desinstalar e tambem remover deps do SO (Docker Desktop + WSL distros/features): `.\hack\uninstall-all.cmd`
+- Manter deps do SO (somente limpa repo/hosts/kind): `.\hack\uninstall-all.cmd -NoPurge`
+
 Obs: se a virtualização estiver desabilitada no BIOS/UEFI, o script vai avisar, mas você vai precisar habilitar manualmente.
 
 ## Kubernetes Manifests

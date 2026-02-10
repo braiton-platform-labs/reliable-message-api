@@ -109,7 +109,7 @@ switch ($Command) {
   "apply" {
     $conflicts = Get-Conflicts $lines
     if ($conflicts.Length -gt 0) {
-      Write-Host "ERROR: found conflicting entries for api.local.dev/kong.local.dev in $HostsFile:" -ForegroundColor Red
+      Write-Host "ERROR: found conflicting entries for api.local.dev/kong.local.dev in ${HostsFile}:" -ForegroundColor Red
       $conflicts | ForEach-Object { Write-Host $_ -ForegroundColor Red }
       throw "conflicting hosts entries"
     }

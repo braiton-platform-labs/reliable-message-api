@@ -8,6 +8,37 @@ Param(
 
 $ErrorActionPreference = "Stop"
 
+function Ensure-DockerDesktopFirstRunIsNonInteractive {
+  # Docker Desktop can block first-run with UI screens (license + sign-in/onboarding),
+  # which breaks unattended setup. The installer supports `--accept-license` (handled via winget override),
+  # and onboarding can be suppressed via the user's settings store.
+  try {
+    $dir = Join-Path $Env:APPDATA "Docker"
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    $path = Join-Path $dir "settings-store.json"
+    $data = New-Object psobject
+    if (Test-Path $path) {
+      try {
+        $raw = Get-Content $path -Raw
+        if ($raw) { $data = $raw | ConvertFrom-Json }
+      } catch {
+        # If the JSON is corrupt/unparseable, replace it with a minimal safe object.
+        $bak = "$path.bak.$(Get-Date -Format 'yyyyMMddHHmmss')"
+        try { Copy-Item $path $bak -Force } catch {}
+        $data = New-Object psobject
+      }
+    }
+
+    # This matches what Docker Desktop writes after you click through the welcome flow.
+    $data | Add-Member -NotePropertyName "DisplayedOnboarding" -NotePropertyValue $true -Force
+
+    ($data | ConvertTo-Json -Depth 10) | Set-Content -Path $path -Encoding UTF8
+  } catch {
+    # Best-effort only.
+  }
+}
+
 function Test-IsAdmin {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
   $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -51,8 +82,8 @@ function Ensure-Admin {
 
   $argsList = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$PSCommandPath) + (Get-SelfArgumentList)
 
-  Start-Process -FilePath $exe -Verb RunAs -ArgumentList $argsList | Out-Null
-  exit 0
+  $p = Start-Process -FilePath $exe -Verb RunAs -ArgumentList $argsList -PassThru -Wait
+  exit $p.ExitCode
 }
 
 function Require-Winget {
@@ -62,6 +93,13 @@ function Require-Winget {
 
 function Warn-Virtualization {
   try {
+    $cs = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 HypervisorPresent
+    if ($cs -and $cs.HypervisorPresent) {
+      # When a hypervisor is already running (e.g., Hyper-V/WSL2), some WMI CPU virtualization flags
+      # can show up as "False" even though virtualization is working. Avoid false-positive warnings.
+      return
+    }
+
     $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
     if ($null -ne $cpu.VirtualizationFirmwareEnabled -and -not $cpu.VirtualizationFirmwareEnabled) {
       Write-Host "WARNING: VirtualizationFirmwareEnabled=False. Enable Intel VT-x/AMD-V in BIOS/UEFI or Docker/WSL2 will not work." -ForegroundColor Yellow
@@ -123,18 +161,19 @@ function Install-DockerDesktop {
     "install",
     "-e",
     "--id", "Docker.DockerDesktop",
+    "--source", "winget",
     "--accept-source-agreements",
     "--accept-package-agreements",
+    # Pre-accept the Docker Subscription Service Agreement so first-run doesn't block with the "Accept" dialog.
+    "--override", "install --quiet --accept-license",
     "--silent",
     "--disable-interactivity"
   )
 
   & winget @wingetArgs
   if ($LASTEXITCODE -ne 0) {
-    Write-Host "Silent install failed; retrying with interactivity..." -ForegroundColor Yellow
-    & winget install -e --id Docker.DockerDesktop --accept-source-agreements --accept-package-agreements
+    throw "winget install Docker.DockerDesktop failed (exit code $LASTEXITCODE). Re-run after fixing winget issues (or install Docker Desktop manually)."
   }
-  if ($LASTEXITCODE -ne 0) { throw "winget install Docker.DockerDesktop failed (exit code $LASTEXITCODE)" }
 }
 
 function Add-DockerUsersGroup {
@@ -203,6 +242,7 @@ if (-not $SkipDockerDesktop) {
 }
 
 Add-DockerUsersGroup
+Ensure-DockerDesktopFirstRunIsNonInteractive
 
 if (-not $NoStart) {
   Start-DockerDesktop

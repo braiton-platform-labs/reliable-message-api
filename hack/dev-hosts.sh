@@ -77,7 +77,7 @@ case "${cmd}" in
       echo "ERROR: hosts file not found: ${HOSTS_FILE}" >&2
       exit 1
     fi
-    if rg -n --fixed-strings "${BEGIN_MARKER}" "${HOSTS_FILE}" >/dev/null 2>&1; then
+    if grep -Fq "${BEGIN_MARKER}" "${HOSTS_FILE}" 2>/dev/null; then
       echo "hosts block: present"
     else
       echo "hosts block: missing"
@@ -137,7 +137,7 @@ case "${cmd}" in
     fi
     need_root_or_sudo remove
 
-    if ! rg -n --fixed-strings "${BEGIN_MARKER}" "${HOSTS_FILE}" >/dev/null 2>&1; then
+    if ! grep -Fq "${BEGIN_MARKER}" "${HOSTS_FILE}" 2>/dev/null; then
       echo "No dev block found in ${HOSTS_FILE} (nothing to do)."
       exit 0
     fi
