@@ -47,7 +47,21 @@ dev = [
 
 [tool.ruff]
 line-length = 100
+target-version = "py311"
+extend-exclude = [
+  "build",
+  "dist",
+]
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI dependency injection uses Depends(...) in defaults (idiomatic).
+"app/api/*.py" = ["B008"]
+# Alembic files are generated; keep them stable and don't enforce formatting.
+"app/db/migrations/env.py" = ["I001"]
+"app/db/migrations/versions/*.py" = ["I001", "E501"]
 
 [tool.mypy]
 python_version = "3.11"

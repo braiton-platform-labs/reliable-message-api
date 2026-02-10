@@ -30,9 +30,9 @@ def create_message(
     db.add(new_message)
     try:
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
-        raise DuplicateError("Duplicate message")
+        raise DuplicateError("Duplicate message") from exc
 
     db.refresh(new_message)
     response = {
@@ -53,13 +53,15 @@ def create_message(
         )
         try:
             db.commit()
-        except IntegrityError:
+        except IntegrityError as exc:
             db.rollback()
             existing = db.get(IdempotencyKey, idempotency_key)
             if existing and existing.request_hash == request_hash:
                 return existing.response_snapshot["body"], 200, True
             if existing and existing.request_hash != request_hash:
-                raise IdempotencyConflictError("Idempotency-Key reused with different request")
+                raise IdempotencyConflictError(
+                    "Idempotency-Key reused with different request"
+                ) from exc
 
     return response, 201, False
 

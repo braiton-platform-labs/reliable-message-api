@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Dict
 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
@@ -32,14 +31,14 @@ MESSAGES_INVALID = Counter("messages_invalid_total", "Invalid message requests")
 
 @dataclass
 class Stats:
-    counters: Dict[str, int] = field(default_factory=dict)
+    counters: dict[str, int] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def inc(self, key: str, amount: int = 1) -> None:
         with self._lock:
             self.counters[key] = self.counters.get(key, 0) + amount
 
-    def snapshot(self) -> Dict[str, int]:
+    def snapshot(self) -> dict[str, int]:
         with self._lock:
             return dict(self.counters)
 

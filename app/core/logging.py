@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pythonjsonlogger import jsonlogger
@@ -14,7 +14,7 @@ request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
 class ContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.request_id = request_id_ctx.get()
-        record.timestamp = datetime.now(timezone.utc).isoformat()
+        record.timestamp = datetime.now(UTC).isoformat()
         record.path = getattr(record, "path", None)
         record.method = getattr(record, "method", None)
         record.status_code = getattr(record, "status_code", None)

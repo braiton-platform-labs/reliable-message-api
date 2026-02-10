@@ -27,7 +27,7 @@ def wait_for_db(database_url: str, timeout_seconds: int) -> None:
         except SQLAlchemyError as exc:
             elapsed = time.time() - start
             if elapsed > timeout_seconds:
-                raise RuntimeError(f"Database not ready after {timeout_seconds}s: {exc}")
+                raise RuntimeError(f"Database not ready after {timeout_seconds}s: {exc}") from exc
             log(f"DB not ready yet, retrying in {delay:.1f}s")
             time.sleep(delay)
             delay = min(delay * 1.5, 10.0)
