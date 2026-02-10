@@ -11,10 +11,11 @@ It focuses on the stuff that makes APIs boring (in a good way):
 
 ## Quickstart (Local dev with kind)
 
-Prereqs:
-- `docker` (daemon running)
-- `kubectl`, `kind`, `jq`
-- Optional: `mkcert` for local TLS (otherwise disable SSL verification in Postman)
+Prereqs (Windows 11):
+- WSL2 installed and working (`wsl.exe` + an Ubuntu distro).
+- Docker Desktop installed, **running**, and WSL integration enabled.
+  - If Docker Desktop is not running, `kind` cannot create the cluster and the API will not start.
+- Optional: `mkcert` for local TLS (otherwise disable SSL verification in Postman or use HTTP).
 
 Windows 11 (WSL2 + Docker Desktop):
 - Prerequisite: virtualization enabled in BIOS/UEFI (Intel VT-x / AMD-V). Without this, WSL2/Docker/kind will not work.
@@ -29,16 +30,15 @@ Windows 11 (WSL2 + Docker Desktop):
   - Optional (faster installs): if `setup\\windows-11-wsl2-docker-desktop\\Docker Desktop Installer.zip` exists, the scripts will use it instead of downloading Docker Desktop.
 - The Makefile uses a POSIX shell; the canonical workflow is running `make ...` from inside WSL (Ubuntu 22.04).
 
-TL;DR (Windows 11 + WSL2 + Docker Desktop): run these 3 commands in order on a fresh clone:
+TL;DR (Windows 11 + WSL2 + Docker Desktop): run these 2 commands in order on a fresh clone:
 ```powershell
 # 1) Bootstrap WSL Ubuntu deps (make/python3/etc) + pinned repo tools into ./bin (kubectl/kind/jq/kustomize/...)
 powershell -ExecutionPolicy Bypass -File .\scripts\wsl_bootstrap.ps1
 
-# 2) Bring up the full dev stack (kind + Postgres + Kong + API + port-forward). May prompt for UAC to edit Windows hosts.
+# 2) Bring up the full dev stack (kind + Postgres + Kong + API + port-forward).
+#    IMPORTANT: Docker Desktop must be running (and WSL integration enabled) before you run this.
+#    May prompt for UAC to edit Windows hosts.
 powershell -ExecutionPolicy Bypass -File .\scripts\dev_kind.ps1 up
-
-# 3) Quick health check (Kong routes are host-based)
-curl -H "Host: api.local.dev" http://localhost:8080/health
 ```
 
 Recommended (best experience, especially if you test with Postman on Windows):
@@ -52,6 +52,20 @@ This will:
 Lens (Kubernetes IDE) on Windows:
 - Export the kind kubeconfig to a Windows file and import it in Lens:
   `powershell -ExecutionPolicy Bypass -File .\\scripts\\lens_kind.ps1 -Cluster bpl-dev`
+- If the Lens Overview shows "Metrics are not available", install the Kubernetes Metrics API (metrics-server):
+  `make dev-metrics-install`
+
+Postman (Windows host):
+- Import the collection: `postman/reliable-message-api.business-rules.postman_collection.json`
+- Import the environment: `postman/reliable-message-api.local.postman_environment.json`
+- Select the environment: `Reliable Message API - Local`
+- Ensure `baseUrl` points to one of:
+  - HTTPS (default): `https://api.local.dev:8443`
+  - HTTP (if you don't want TLS): `http://api.local.dev:8080`
+- If `REQUIRE_API_KEY=true`, set Postman environment variable `apiKey` to match `API_KEY` from your `.env` / `dev/app-secrets`.
+- Run the requests in order:
+  - The collection has an init step (`00 - Init`) that generates run-scoped variables, then 18 checks (`01` to `18`).
+  - In Postman: open the collection menu -> `Run collection` -> `Run`.
 
 Run:
 ```bash
@@ -164,6 +178,14 @@ Setup:
 1. Import `postman/reliable-message-api.business-rules.postman_collection.json`
 2. Import `postman/reliable-message-api.local.postman_environment.json`
 3. Select the environment `Reliable Message API - Local`
+4. Ensure the API is running locally (`powershell -ExecutionPolicy Bypass -File .\\scripts\\dev_kind.ps1 up`).
+5. Ensure Windows hosts has `api.local.dev` (the `up` command normally applies this automatically; otherwise run as Admin):
+   `powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 hosts -HostsAction apply`
+
+Run all checks (recommended):
+- Open the collection `Reliable Message API - Business Rules (Local)`
+- Collection menu -> `Run collection` -> `Run`
+- Run order matters: the collection uses collection variables set in `00 - Init`.
 
 API key:
 - If `REQUIRE_API_KEY=true`, set the environment variable `apiKey` to match `API_KEY` from your `.env` / `dev/app-secrets`.
@@ -176,6 +198,33 @@ kubectl -n dev get secret app-secrets -o jsonpath='{.data.API_KEY}' | base64 -d;
 
 HTTPS note:
 - If HTTPS fails in Postman, disable SSL verification (Settings -> General) or trust the mkcert root CA.
+  - Alternative: set Postman environment `baseUrl` to `http://api.local.dev:8080` to use HTTP.
+
+If `17 - Stats` or `18 - Metrics` fail:
+- Ensure `.env` has `STATS_ENABLED=true` and `METRICS_ENABLED=true`
+- Apply + restart:
+  - `make dev-secrets-apply && make dev-rollout`
+
+What the collection tests (in order):
+- `00 - Init (set run variables + health)`: generates run-scoped variables and checks `/health` returns 200.
+- `01 - Reset messages`: clears the dev DB state (helper endpoint for local testing), expects 200.
+- `02 - Create message (happy path)`: creates a new message, expects 201 and stores `createdMessageId`.
+- `03 - Create message for dedupe (normalized seed)`: creates a normalized-equivalent message, expects 201.
+- `04 - Dedupe (normalized) should 409 duplicate`: attempts to create a duplicate (after normalization), expects 409.
+- `05 - Validation: empty message should 400`: expects 400 with a validation error.
+- `06 - Validation: too short should 400`: expects 400 with a min-length error.
+- `07 - Validation: no alphanumeric should 400`: expects 400 with an alphanumeric rule error.
+- `08 - Validation: too long should 400`: expects 400 with a max-length error.
+- `09 - Idempotency: create (201)`: creates a message with `Idempotency-Key`, expects 201 and stores `idempotencyMessageId`.
+- `10 - Idempotency: replay same key (200, same id)`: replays the same `Idempotency-Key`, expects 200 and same id.
+- `11 - Idempotency: conflict (409)`: reuses the same key with a different body, expects 409.
+- `12 - Read created message by id (200)`: reads `/messages/{{createdMessageId}}`, expects 200.
+- `13 - Read all messages (200)`: lists `/messages`, expects 200 and includes `createdMessageId`.
+- `14 - Delete created message by id (200)`: deletes `/messages/{{createdMessageId}}`, expects 200.
+- `15 - Read deleted message by id should 404`: expects 404 not found.
+- `16 - Readiness (DB) should be ready (200)`: checks `/ready`, expects 200.
+- `17 - Stats (JSON) should include DB counts`: checks `/stats`, expects 200 (requires `STATS_ENABLED=true`).
+- `18 - Metrics (Prometheus) should include API counters`: checks `/metrics`, expects 200 (requires `METRICS_ENABLED=true`).
 
 ## Local dev secrets via `.env`
 
@@ -225,8 +274,10 @@ After WSL2 + Docker Desktop are ready and the repo is cloned, bring up the proje
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\wsl_bootstrap.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\dev_kind.ps1 up
-curl -H "Host: api.local.dev" http://localhost:8080/health
 ```
+
+Quick health check (optional):
+`curl -H "Host: api.local.dev" http://localhost:8080/health`
 
 Unattended provisioning (strict: exits if a reboot is pending; creates Linux user `devuser` and installs Docker Desktop silently):
 

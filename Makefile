@@ -2,7 +2,7 @@
 	dev-up dev-fg dev-reload dev-rollout dev-rollout-all dev-port dev-port-bg dev-port-stop dev-port-status dev-port-logs dev-reset dev-verify dev dev-status \
 	dev-logs dev-psql dev-port-kong-admin dev-tls dev-kong-whitelist dev-kong-user dev-kong-user-remove dev-kong-crds-install \
 	dev-hosts-status dev-hosts-apply dev-hosts-remove dev-hosts-status-win dev-hosts-apply-win dev-hosts-remove-win \
-	k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin doctor bootstrap bootstrap-full first-run
+	dev-metrics-install k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin doctor bootstrap bootstrap-full first-run
 
 TOOL_VERSIONS_FILE ?= setup/ubuntu-22.04/tool-versions.env
 -include $(TOOL_VERSIONS_FILE)
@@ -257,6 +257,28 @@ dev-context:
 			kubectl -n local-path-storage rollout status deployment/local-path-provisioner; \
 			kubectl patch storageclass local-path -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class":"true"}}}' >/dev/null; \
 		fi
+	@$(MAKE) dev-metrics-install >/dev/null
+
+dev-metrics-install:
+	@set -e; \
+	if kubectl -n kube-system get deployment/metrics-server >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	echo "installing metrics-server (enables: kubectl top, Lens Overview metrics)"; \
+	kubectl apply -f k8s/vendor/metrics-server.v0.7.2.yaml >/dev/null; \
+	kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s >/dev/null; \
+	# Wait for the aggregated API to report available. \
+	i=0; \
+	while [ $$i -lt 60 ]; do \
+		st=$$(kubectl get apiservice v1beta1.metrics.k8s.io -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || true); \
+		if [ "$$st" = "True" ]; then \
+			exit 0; \
+		fi; \
+		i=$$((i+1)); \
+		sleep 2; \
+	done; \
+	echo "WARN: metrics.k8s.io APIService not Available yet (Lens may show metrics after a short delay)."; \
+	exit 0
 
 dev-env-init:
 	@$(PYTHON) scripts/dev_env.py init --env-file "$(ENV_FILE)"
