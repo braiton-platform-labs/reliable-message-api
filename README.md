@@ -29,6 +29,18 @@ Windows 11 (WSL2 + Docker Desktop):
   - Optional (faster installs): if `setup\\windows-11-wsl2-docker-desktop\\Docker Desktop Installer.zip` exists, the scripts will use it instead of downloading Docker Desktop.
 - The Makefile uses a POSIX shell; the canonical workflow is running `make ...` from inside WSL (Ubuntu 22.04).
 
+TL;DR (Windows 11 + WSL2 + Docker Desktop): run these 3 commands in order on a fresh clone:
+```powershell
+# 1) Bootstrap WSL Ubuntu deps (make/python3/etc) + pinned repo tools into ./bin (kubectl/kind/jq/kustomize/...)
+powershell -ExecutionPolicy Bypass -File .\scripts\wsl_bootstrap.ps1
+
+# 2) Bring up the full dev stack (kind + Postgres + Kong + API + port-forward). May prompt for UAC to edit Windows hosts.
+powershell -ExecutionPolicy Bypass -File .\scripts\dev_kind.ps1 up
+
+# 3) Quick health check (Kong routes are host-based)
+curl -H "Host: api.local.dev" http://localhost:8080/health
+```
+
 Recommended (best experience, especially if you test with Postman on Windows):
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\\scripts\\dev_kind.ps1 up
@@ -36,6 +48,10 @@ powershell -ExecutionPolicy Bypass -File .\\scripts\\dev_kind.ps1 up
 This will:
 - Ensure the Windows hosts entries exist (`api.local.dev`, `kong.local.dev`) so Postman can hit the correct virtual hosts.
 - Invoke the WSL dev flow (`make bootstrap` + `make dev` + verification) using the repo scripts.
+
+Lens (Kubernetes IDE) on Windows:
+- Export the kind kubeconfig to a Windows file and import it in Lens:
+  `powershell -ExecutionPolicy Bypass -File .\\scripts\\lens_kind.ps1 -Cluster bpl-dev`
 
 Run:
 ```bash
@@ -204,6 +220,13 @@ Versions are pinned in `setup/ubuntu-22.04/tool-versions.env` and can be adjuste
 One-shot (Windows) to prepare and validate the environment (run PowerShell as Administrator):
 
 `powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 install`
+
+After WSL2 + Docker Desktop are ready and the repo is cloned, bring up the project:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\wsl_bootstrap.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\dev_kind.ps1 up
+curl -H "Host: api.local.dev" http://localhost:8080/health
+```
 
 Unattended provisioning (strict: exits if a reboot is pending; creates Linux user `devuser` and installs Docker Desktop silently):
 
