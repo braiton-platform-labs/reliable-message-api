@@ -59,6 +59,7 @@ Lens (Kubernetes IDE) on Windows:
 Postman (Windows host):
 - Import the collection: `postman/reliable-message-api.business-rules.postman_collection.json`
 - Import the environment: `postman/reliable-message-api.local.postman_environment.json`
+- Optional (if you enabled https://api.local.dev on port 443): `postman/reliable-message-api.local.https-443.postman_environment.json`
 - Select the environment: `Reliable Message API - Local`
 - Ensure `baseUrl` points to one of:
   - HTTPS (default): `https://api.local.dev:8443`
@@ -67,6 +68,17 @@ Postman (Windows host):
 - Run the requests in order:
   - The collection has an init step (`00 - Init`) that generates run-scoped variables, then 18 checks (`01` to `18`).
   - In Postman: open the collection menu -> `Run collection` -> `Run`.
+
+HTTPS without a port (Windows host):
+- Default dev uses `https://api.local.dev:8443` (because the proxy is port-forwarded).
+- By default, `.\scripts\dev_kind.ps1 up` also attempts to enable `https://api.local.dev` (no `:8443`) by:
+  - creating a local portproxy `443 -> 8443` (requires Administrator/UAC)
+  - trusting the WSL mkcert root CA for the current user (so Postman/Browsers validate TLS)
+- Manual commands:
+  - `powershell -ExecutionPolicy Bypass -File .\\scripts\\dev_https.ps1 enable -TrustWslMkcertCa`
+  - `powershell -ExecutionPolicy Bypass -File .\\scripts\\dev_kind.ps1 up -Https443 -TrustWslMkcertCa`
+- Opt-out:
+  - `powershell -ExecutionPolicy Bypass -File .\\scripts\\dev_kind.ps1 up -SkipHttps443 -SkipTrustWslMkcertCa`
 
 Run (inside WSL / Ubuntu):
 ```bash

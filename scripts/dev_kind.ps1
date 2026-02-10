@@ -17,7 +17,16 @@ param(
   # Skip Windows hosts auto-apply (useful for CI or restricted machines).
   [switch]$SkipWindowsHosts,
   [switch]$NoBootstrap,
-  [switch]$SkipVerify
+  [switch]$SkipVerify,
+
+  # Optional: enable https://api.local.dev without ':8443' by creating a Windows portproxy 443 -> 8443
+  # and (optionally) trusting the WSL mkcert root CA for the current user.
+  [switch]$Https443,
+  [switch]$TrustWslMkcertCa,
+
+  # Opt-outs (defaults for 'up' enable no-port HTTPS + trust mkcert CA).
+  [switch]$SkipHttps443,
+  [switch]$SkipTrustWslMkcertCa
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,11 +37,16 @@ Reliable Message API - Windows wrapper (calls WSL)
 
 Usage:
   powershell -ExecutionPolicy Bypass -File .\scripts\dev_kind.ps1 up [-Distro Ubuntu-22.04] [-Cluster NAME] [-Workers N|auto] [-Foreground] [-Hosts] [-NoBootstrap] [-SkipVerify]
+  powershell -ExecutionPolicy Bypass -File .\scripts\dev_kind.ps1 up ... [-Https443] [-TrustWslMkcertCa] [-SkipHttps443] [-SkipTrustWslMkcertCa]
   powershell -ExecutionPolicy Bypass -File .\scripts\dev_kind.ps1 reload|verify|status|logs|down|clean
 
 Notes:
   - This runs the real workflow inside WSL via ./scripts/dev_kind.sh.
   - On 'up' it auto-applies Windows hosts for api.local.dev/kong.local.dev unless -SkipWindowsHosts.
+  - By default, 'up' also tries to:
+    - configure https://api.local.dev (no ':8443') by creating a Windows portproxy 443 -> 8443 (requires Admin/UAC)
+    - trust the WSL mkcert root CA in the Windows CurrentUser Root store (so browsers/Postman can validate TLS)
+  - Use -SkipHttps443 / -SkipTrustWslMkcertCa to disable those steps.
   - Flags:
     -Hosts          Apply Windows hosts + WSL hosts
     -WindowsHosts   Apply Windows hosts only
@@ -89,6 +103,28 @@ elseif ($Command -eq "up" -and -not $SkipWindowsHosts) { $applyWindowsHosts = $t
 
 if ($applyWindowsHosts) {
   Ensure-WindowsHosts -SetupScriptPath $setupScript
+}
+
+# HTTPS without ':8443' defaults to enabled for 'up' (opt out with -SkipHttps443).
+$enableHttps443 = $Https443 -or ($Command -eq "up" -and -not $SkipHttps443)
+$enableTrustCa = $TrustWslMkcertCa -or ($enableHttps443 -and $Command -eq "up" -and -not $SkipTrustWslMkcertCa)
+$httpsStrict = $Https443.IsPresent -or $TrustWslMkcertCa.IsPresent
+
+if ($enableHttps443) {
+  $httpsScript = Join-Path $repoRoot "scripts\\dev_https.ps1"
+  if (-not (Test-Path -LiteralPath $httpsScript)) { throw "https helper script not found: $httpsScript" }
+  $httpsArgs = @("enable","-SkipHosts")
+  # Only pass -Distro when explicitly set; otherwise dev_https.ps1 will use its default.
+  if ($Distro) { $httpsArgs += @("-Distro", $Distro) }
+  if ($enableTrustCa) { $httpsArgs += "-TrustWslMkcertCa" }
+
+  try {
+    # This will self-elevate (UAC) if needed to configure portproxy.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $httpsScript @httpsArgs
+  } catch {
+    if ($httpsStrict) { throw }
+    Write-Warning ("HTTPS no-port setup failed; continuing with default https://api.local.dev:8443. Error: {0}" -f $_.Exception.Message)
+  }
 }
 
 if ($applyWslHosts) { $args += "--hosts" }

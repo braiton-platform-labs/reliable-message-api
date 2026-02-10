@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "b2e4c9d1-3d7c-4b8d-9c0c-0c2d5a2a4c11",
     "name": "Reliable Message API - Business Rules (Local)",
-    "description": "Postman collection to validate business rules: validation, dedupe (normalization), and idempotency.\n\nIt also validates operational endpoints: /ready, /stats, and /metrics.\n\nPrereqs:\n- make dev (or make dev-up + make dev-port-bg)\n- /etc/hosts has api.local.dev (make dev-hosts-apply)\n\nIf HTTPS fails in Postman, disable SSL verification (Settings -> General) or trust the mkcert root CA on your machine.",
+    "description": "Postman collection to validate business rules: validation, dedupe (normalization), and idempotency.\n\nIt also validates operational endpoints: /ready, /stats, and /metrics.\n\nPrereqs:\n- Start the local stack:\n  - Windows: powershell -ExecutionPolicy Bypass -File .\\\\scripts\\\\dev_kind.ps1 up\n  - WSL: make dev\n- Ensure api.local.dev resolves to 127.0.0.1 (Windows hosts or /etc/hosts)\n\nTLS notes:\n- Default baseUrl is https://api.local.dev:8443\n- Optional no-port HTTPS: https://api.local.dev (requires local 443->8443 portproxy)\n- If HTTPS fails in Postman, disable SSL verification (Settings -> General) or trust the mkcert root CA on your machine.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
