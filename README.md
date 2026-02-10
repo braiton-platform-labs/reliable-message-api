@@ -29,6 +29,7 @@ Windows 11 (WSL2 + Docker Desktop):
     `powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 hosts -HostsAction apply`
   - Optional (faster installs): if `setup\\windows-11-wsl2-docker-desktop\\Docker Desktop Installer.zip` exists, the scripts will use it instead of downloading Docker Desktop.
 - The Makefile uses a POSIX shell; the canonical workflow is running `make ...` from inside WSL (Ubuntu 22.04).
+  - If you run `make ...` from Windows PowerShell/CMD, it will fail (Windows does not ship with `make` by default).
 
 TL;DR (Windows 11 + WSL2 + Docker Desktop): run these 2 commands in order on a fresh clone:
 ```powershell
@@ -67,12 +68,12 @@ Postman (Windows host):
   - The collection has an init step (`00 - Init`) that generates run-scoped variables, then 18 checks (`01` to `18`).
   - In Postman: open the collection menu -> `Run collection` -> `Run`.
 
-Run:
+Run (inside WSL / Ubuntu):
 ```bash
 make dev
 ```
 
-First time setup (recommended):
+First time setup (recommended, inside WSL / Ubuntu):
 ```bash
 make bootstrap
 make dev
