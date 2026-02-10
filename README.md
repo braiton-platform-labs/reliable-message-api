@@ -16,11 +16,26 @@ Prereqs:
 - `kubectl`, `kind`, `jq`
 - Optional: `mkcert` for local TLS (otherwise disable SSL verification in Postman)
 
-Windows 11:
-- Run `make ...` commands from Git Bash (recommended) or WSL2.
-- The `Makefile` uses a POSIX shell; it won't work in plain PowerShell/cmd semantics.
-- Docker Desktop is required (daemon running). Automated installer: `.\hack\install-docker.cmd` (Admin; may require reboot).
-- Pré-requisito: virtualização ativada no BIOS/UEFI (Intel VT-x / AMD-V). Sem isso, WSL2/Docker/kind não funcionam.
+Windows 11 (WSL2 + Docker Desktop):
+- Prerequisite: virtualization enabled in BIOS/UEFI (Intel VT-x / AMD-V). Without this, WSL2/Docker/kind will not work.
+- You must have WSL2 + an Ubuntu distro installed, and Docker Desktop installed and running (WSL integration enabled).
+- The repo includes scripts to install/validate this setup:
+  - One-shot setup (run PowerShell as Administrator; may require reboot):
+    `powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 install`
+  - WSL Ubuntu toolchain bootstrap (installs `make`, `python3`, etc via apt, then installs pinned repo tools into `./bin`):
+    `powershell -ExecutionPolicy Bypass -File .\\scripts\\wsl_bootstrap.ps1`
+  - Hosts file management (for Postman/Browser on Windows):
+    `powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 hosts -HostsAction apply`
+  - Optional (faster installs): if `setup\\windows-11-wsl2-docker-desktop\\Docker Desktop Installer.zip` exists, the scripts will use it instead of downloading Docker Desktop.
+- The Makefile uses a POSIX shell; the canonical workflow is running `make ...` from inside WSL (Ubuntu 22.04).
+
+Recommended (best experience, especially if you test with Postman on Windows):
+```powershell
+powershell -ExecutionPolicy Bypass -File .\\scripts\\dev_kind.ps1 up
+```
+This will:
+- Ensure the Windows hosts entries exist (`api.local.dev`, `kong.local.dev`) so Postman can hit the correct virtual hosts.
+- Invoke the WSL dev flow (`make bootstrap` + `make dev` + verification) using the repo scripts.
 
 Run:
 ```bash
@@ -99,7 +114,7 @@ What `make dev` does (high level):
 
 Optional tool check:
 ```bash
-./hack/doctor.sh
+./setup/ubuntu-22.04/setup.sh doctor
 ```
 
 ## Common commands
@@ -178,53 +193,41 @@ kubectl auth can-i list customresourcedefinitions.apiextensions.k8s.io \
 kubectl -n dev logs deploy/kong-ingress --tail=200
 ```
 
-## Bootstrap de dependências locais
-Para instalar versões fixas (máximo de estabilidade possível):
+## Local dependency bootstrap
+To install pinned versions (for maximum stability) on Ubuntu 22.04 / WSL:
 
-Linux/macOS:
-`./hack/bootstrap.sh`
+`./setup/ubuntu-22.04/setup.sh bootstrap`
 
-Windows (PowerShell):
-`.\hack\bootstrap.cmd`
+Versions are pinned in `setup/ubuntu-22.04/tool-versions.env` and can be adjusted as needed.
 
-(Fallback if you prefer calling PowerShell directly: `powershell -ExecutionPolicy Bypass -File .\\hack\\bootstrap.ps1`)
+## Windows 11 (WSL2 + Docker Desktop)
+One-shot (Windows) to prepare and validate the environment (run PowerShell as Administrator):
 
-Note: `bootstrap.cmd` defaults to `BOOTSTRAP_INSTALL_MODE=local` (installs into `.\bin`) to avoid requiring Administrator permissions on Windows.
+`powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 install`
 
-Versões ficam em `hack/tool-versions.env` e podem ser ajustadas conforme necessário.
+Unattended provisioning (strict: exits if a reboot is pending; creates Linux user `devuser` and installs Docker Desktop silently):
 
-## Docker Desktop (Windows 11)
-Instalação automatizada (via `winget`, habilita WSL2 se necessário):
+`powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\provision.ps1`
 
-`.\hack\install-docker.cmd`
+Cleanup/offboarding (unattended: removes Docker Desktop + data, unregisters Ubuntu 22.04 and Docker distros; optionally disables WSL features):
 
-Opcional:
-- `.\hack\install-docker.cmd -AutoReboot` (reboot automático se precisar)
-- `.\hack\install-docker.cmd -WaitSeconds 300` (espera mais tempo pelo daemon)
+`powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\unprovision.ps1`
 
-WSL2 (somente) + distro (default: Ubuntu-22.04):
+Status:
 
-`.\hack\install-wsl2.cmd`
+`powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 status`
 
-Python (Windows, via `winget`, 100% silencioso/sem Windows Store UI):
+Hosts (Windows, Administrator):
 
-`.\hack\install-python.cmd`
+`powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 hosts -HostsAction apply`
 
-Abrir um shell WSL no diretorio do repo:
+Uninstall (keeps OS dependencies):
 
-`.\hack\wsl-here.cmd`
+`powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 uninstall`
 
-One-shot (Windows) para preparar e validar o ambiente:
+Uninstall and attempt to remove OS dependencies (dangerous):
 
-- Instalar tudo (WSL2 + Docker Desktop + Python + hosts + bootstrap no WSL + `make dev`): `.\hack\install-all.cmd`
-- Pular Python: `.\hack\install-all.cmd -SkipPython`
-- Desabilitar reboot automático (se preferir controlar manualmente): `.\hack\install-all.cmd -NoAutoReboot`
-- (Alternativa) Usar o orquestrador detalhado: `.\hack\dev-env.cmd install`
-- Desinstalar artefatos do repo (kind/arquivos/hosts) e manter Docker/WSL: `.\hack\dev-env.cmd uninstall`
-- Desinstalar e tambem remover deps do SO (Docker Desktop + WSL distros/features): `.\hack\uninstall-all.cmd`
-- Manter deps do SO (somente limpa repo/hosts/kind): `.\hack\uninstall-all.cmd -NoPurge`
-
-Obs: se a virtualização estiver desabilitada no BIOS/UEFI, o script vai avisar, mas você vai precisar habilitar manualmente.
+`powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 uninstall -Purge -PurgeAll`
 
 ## Kubernetes Manifests
 - `k8s/base`: API Deployment + Service.

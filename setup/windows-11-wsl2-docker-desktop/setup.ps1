@@ -1,6 +1,6 @@
 Param(
   [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet("install","uninstall","status")]
+  [ValidateSet("install","uninstall","status","hosts")]
   [string]$Command,
 
   # WSL distro used for running repo commands (make/bootstrap/dev).
@@ -24,7 +24,10 @@ Param(
   # Skip enabling/disabling WSL2 Windows optional features and installing/unregistering the WSL distro.
   [switch]$SkipWSL2,
 
-  # Skip running repo-level commands inside WSL (bootstrap.sh / make dev / kind cleanup).
+  # Best-effort: try to proceed without reboot after enabling Windows optional features (not guaranteed).
+  [switch]$TryWithoutReboot,
+
+  # Skip running repo-level commands inside WSL (repo bootstrap / make dev / kind cleanup).
   [switch]$SkipRepo,
 
   # For uninstall: also remove OS-level deps (Docker Desktop, WSL distros, optional features) using the manifest.
@@ -35,15 +38,25 @@ Param(
 
   # For uninstall: run `docker system prune -af` (very destructive).
   [switch]$NukeDocker
+  ,
+
+  # For Command=hosts: manage Windows hosts entries for local dev.
+  [ValidateSet("status","apply","remove")]
+  [string]$HostsAction = "status"
 )
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\\..")).Path
 $StateDir = Join-Path $PSScriptRoot ".state"
 $StateFile = Join-Path $StateDir "dev-env.json"
 
 $BeginHostsMarker = "# BEGIN reliable-message-api dev"
+$EndHostsMarker = "# END reliable-message-api dev"
+$HostsEntries = @(
+  "127.0.0.1 api.local.dev",
+  "127.0.0.1 kong.local.dev"
+)
 
 function Test-IsAdmin {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -119,9 +132,9 @@ function Refresh-ExplorerBestEffort([string]$reason = "") {
   try {
     if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) { return }
 
-    $msg = "Refreshing explorer.exe"
-    if ($reason) { $msg += " ($reason)" }
-    Write-Host "$msg..."
+    $suffix = ""
+    if ($reason) { $suffix = " ($reason)" }
+    Write-Host ("ATTENTION: Refreshing Windows Explorer (explorer.exe) to apply changes{0}..." -f $suffix) -ForegroundColor Blue
 
     # Broadcast environment/settings change to Explorer + other processes.
     if (-not ("RmaWin32" -as [type])) {
@@ -262,6 +275,109 @@ function Test-WindowsHostsBlockPresent {
   return $false
 }
 
+function Get-WindowsHostsFile {
+  $p = $Env:HOSTS_FILE
+  if ($p) { return $p }
+  return (Join-Path $Env:SystemRoot "System32\\drivers\\etc\\hosts")
+}
+
+function Read-HostsLines([string]$hostsFile) {
+  if (-not (Test-Path -LiteralPath $hostsFile)) {
+    throw "hosts file not found: $hostsFile"
+  }
+  return Get-Content -LiteralPath $hostsFile -ErrorAction Stop
+}
+
+function Strip-HostsBlock([string[]]$lines) {
+  $out = New-Object System.Collections.Generic.List[string]
+  $inBlock = $false
+  foreach ($line in $lines) {
+    if ($line -eq $BeginHostsMarker) { $inBlock = $true; continue }
+    if ($line -eq $EndHostsMarker) { $inBlock = $false; continue }
+    if (-not $inBlock) { $out.Add($line) | Out-Null }
+  }
+  return $out.ToArray()
+}
+
+function Get-HostsConflicts([string[]]$lines) {
+  $conflicts = New-Object System.Collections.Generic.List[string]
+  $inBlock = $false
+  foreach ($line in $lines) {
+    if ($line -eq $BeginHostsMarker) { $inBlock = $true; continue }
+    if ($line -eq $EndHostsMarker) { $inBlock = $false; continue }
+    if ($inBlock) { continue }
+
+    $clean = ($line -replace "#.*$", "").Trim()
+    if (-not $clean) { continue }
+    $parts = $clean -split "\s+"
+    if ($parts.Length -lt 2) { continue }
+
+    $ip = $parts[0]
+    foreach ($name in $parts[1..($parts.Length-1)]) {
+      if (($name -eq "api.local.dev" -or $name -eq "kong.local.dev") -and $ip -ne "127.0.0.1") {
+        $conflicts.Add($line) | Out-Null
+        break
+      }
+    }
+  }
+  return $conflicts.ToArray()
+}
+
+function Write-HostsLines([string]$hostsFile, [string[]]$lines) {
+  if (-not (Test-IsAdmin)) {
+    throw "admin privileges required to modify $hostsFile. Re-run PowerShell as Administrator."
+  }
+
+  $backup = "$hostsFile.bak.reliable-message-api.$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+  Copy-Item -LiteralPath $hostsFile -Destination $backup -Force
+
+  # hosts file is traditionally ASCII. Use ASCII to avoid BOM/encoding surprises.
+  try { attrib -R $hostsFile 2>$null | Out-Null } catch {}
+  [IO.File]::WriteAllLines($hostsFile, $lines, [Text.Encoding]::ASCII)
+
+  Write-Host "Updated $hostsFile"
+  Write-Host "Backup:  $backup"
+}
+
+function Apply-WindowsHostsBlock {
+  $hostsFile = Get-WindowsHostsFile
+  $lines = Read-HostsLines $hostsFile
+  $conflicts = Get-HostsConflicts $lines
+  if ($conflicts.Length -gt 0) {
+    Write-Host "ERROR: found conflicting entries for api.local.dev/kong.local.dev in ${hostsFile}:" -ForegroundColor Red
+    $conflicts | ForEach-Object { Write-Host $_ -ForegroundColor Red }
+    throw "conflicting hosts entries"
+  }
+
+  $base = Strip-HostsBlock $lines
+  $newLines = New-Object System.Collections.Generic.List[string]
+  $base | ForEach-Object { $newLines.Add($_) | Out-Null }
+  $newLines.Add("") | Out-Null
+  $newLines.Add($BeginHostsMarker) | Out-Null
+  $HostsEntries | ForEach-Object { $newLines.Add($_) | Out-Null }
+  $newLines.Add($EndHostsMarker) | Out-Null
+  $newLines.Add("") | Out-Null
+
+  Write-HostsLines $hostsFile $newLines.ToArray()
+}
+
+function Remove-WindowsHostsBlock {
+  $hostsFile = Get-WindowsHostsFile
+  $lines = Read-HostsLines $hostsFile
+
+  $present = $false
+  foreach ($line in $lines) {
+    if ($line -eq $BeginHostsMarker) { $present = $true; break }
+  }
+  if (-not $present) {
+    Write-Host "No dev block found in $hostsFile (nothing to do)."
+    return
+  }
+
+  $base = Strip-HostsBlock $lines
+  Write-HostsLines $hostsFile $base
+}
+
 function Test-DockerDesktopInstalled {
   $exe = Join-Path $Env:ProgramFiles "Docker\\Docker\\Docker Desktop.exe"
   if (Test-Path $exe) { return $true }
@@ -345,13 +461,168 @@ function Disable-OptionalFeature([string]$featureName) {
   return ($r -and $r.RestartNeeded -eq $true)
 }
 
+function Convert-ToWslPath([string]$windowsPath) {
+  $full = (Resolve-Path $windowsPath).Path
+  if ($full -match '^([A-Za-z]):\\(.*)$') {
+    $drive = $Matches[1].ToLower()
+    $rest = $Matches[2] -replace '\\', '/'
+    return "/mnt/$drive/$rest"
+  }
+  throw "Unsupported path for WSL translation: $full"
+}
+
+function Escape-BashSingleQuotes([string]$s) {
+  # In bash, you can escape a single quote inside single quotes by closing/opening: 'foo'"'"'bar'
+  $rep = "'" + '"' + "'" + '"' + "'"
+  return ($s -replace "'", $rep)
+}
+
 function Invoke-WslHere([string]$cmd) {
-  $scriptPath = Join-Path $PSScriptRoot "wsl-here.ps1"
-  if (-not (Test-Path $scriptPath)) { throw "wsl-here.ps1 not found at $scriptPath" }
-  # Run in a separate PowerShell process because wsl-here.ps1 uses `exit` (CLI-friendly),
-  # which would otherwise terminate this script if invoked in-process.
-  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Distro $Distro -Command $cmd
-  return $LASTEXITCODE
+  if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { throw "wsl.exe not found. Install WSL2 and re-run." }
+
+  # Stream stdout/stderr as plain text, and return only the exit code.
+  function Quote-WinArg([string]$arg) {
+    if ($null -eq $arg) { return '""' }
+    if ($arg -notmatch '[\\s"]') { return $arg }
+    $arg = $arg -replace '(\\*)"', '$1$1\"'
+    $arg = $arg -replace '(\\+)$', '$1$1'
+    return '"' + $arg + '"'
+  }
+
+  $wslRepo = Convert-ToWslPath $RepoRoot
+  $wslRepoEsc = Escape-BashSingleQuotes $wslRepo
+  $bashCmd = "cd '$wslRepoEsc' && $cmd"
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = "wsl.exe"
+  $args = @()
+  if ($Distro) { $args += @("-d", $Distro) }
+  $args += @("--exec", "bash", "-lc", $bashCmd)
+  $psi.Arguments = (($args | ForEach-Object { Quote-WinArg $_ }) -join " ")
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+
+  $subOut = $null
+  $subErr = $null
+  try {
+    $subOut = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Action {
+      if ($EventArgs.Data) { Write-Host $EventArgs.Data }
+    }
+    $subErr = Register-ObjectEvent -InputObject $p -EventName ErrorDataReceived -Action {
+      if ($EventArgs.Data) { Write-Host $EventArgs.Data }
+    }
+
+    $p.Start() | Out-Null
+    $p.BeginOutputReadLine()
+    $p.BeginErrorReadLine()
+    $p.WaitForExit()
+
+    return $p.ExitCode
+  } finally {
+    try { if ($subOut) { Unregister-Event -SubscriptionId $subOut.Id -ErrorAction SilentlyContinue } } catch {}
+    try { if ($subErr) { Unregister-Event -SubscriptionId $subErr.Id -ErrorAction SilentlyContinue } } catch {}
+  }
+}
+
+function Parse-Version([string]$v) { if (-not $v) { return $null }; try { return [Version]$v } catch { return $null } }
+function Version-Ge([string]$a, [string]$b) { $va = Parse-Version $a; $vb = Parse-Version $b; if (-not $va -or -not $vb) { return $false }; return ($va -ge $vb) }
+
+function Get-PythonVersionFromExe([string]$exePath) {
+  if (-not $exePath -or -not (Test-Path -LiteralPath $exePath)) { return $null }
+  try {
+    $out = & $exePath -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $text = ($out | Select-Object -First 1).ToString().Trim()
+    if ($text -match '(\\d+\\.\\d+\\.\\d+)') { return $Matches[1] }
+    return $null
+  } catch { return $null }
+}
+
+function Get-BestPythonCandidate {
+  # Do not execute the Windows Store alias stub:
+  #   %LOCALAPPDATA%\\Microsoft\\WindowsApps\\python.exe / python3.exe
+  $cmds = Get-Command "python" -All -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandType -eq "Application" } |
+    Where-Object { $_.Source -and ($_.Source -notmatch '\\Microsoft\\WindowsApps\\python(3)?\\.exe$') }
+
+  $best = $null
+  foreach ($c in @($cmds)) {
+    $ver = Get-PythonVersionFromExe $c.Source
+    $vobj = Parse-Version $ver
+    if (-not $vobj) { continue }
+    if (-not $best -or $vobj -gt $best.versionObj) {
+      $best = [ordered]@{ exe = $c.Source; version = $ver; versionObj = $vobj }
+    }
+  }
+  return $best
+}
+
+function Require-Winget {
+  if (Get-Command winget -ErrorAction SilentlyContinue) { return }
+  throw "winget not found. Install 'App Installer' (Microsoft.DesktopAppInstaller) and re-run."
+}
+
+function Invoke-WingetInstall([string]$id, [string]$scope) {
+  $args = @(
+    "install",
+    "-e",
+    "--id", $id,
+    "--source", "winget",
+    "--accept-source-agreements",
+    "--accept-package-agreements",
+    "--silent",
+    "--disable-interactivity"
+  )
+  if ($scope) { $args += @("--scope", $scope) }
+  Write-Host "winget install: $id (scope=$scope)"
+  & winget @args
+  if ($LASTEXITCODE -ne 0) { throw "winget install failed for $id (exit code $LASTEXITCODE)" }
+}
+
+function Ensure-PythonWindows([string]$MinVersion = "3.11.0", [ValidateSet("user","machine")] [string]$Scope = "user") {
+  $pre = Get-BestPythonCandidate
+  if ($pre -and $pre.version -and (Version-Ge $pre.version $MinVersion)) {
+    Write-Host "python detected: $($pre.version) OK (>= $MinVersion)"
+    return [ordered]@{ installed = $false; wingetId = $null; pythonExe = $pre.exe; pythonVersion = $pre.version }
+  }
+
+  Require-Winget
+
+  $candidates = @(
+    "Python.Python.3.14",
+    "Python.Python.3.13",
+    "Python.Python.3.12",
+    "Python.Python.3.11"
+  )
+
+  $installedId = $null
+  foreach ($id in $candidates) {
+    try {
+      Invoke-WingetInstall $id $Scope
+      $installedId = $id
+      break
+    } catch {
+      Write-Host "winget install failed for $id; trying next candidate..." -ForegroundColor Yellow
+    }
+  }
+  if (-not $installedId) { throw "Failed to install Python via winget (all candidates failed): $($candidates -join ', ')" }
+
+  Refresh-Session
+  $post = Get-BestPythonCandidate
+  if (-not $post -or -not $post.version) {
+    Write-Host "Python installed, but not detected in this session. Open a new terminal and run: python --version" -ForegroundColor Yellow
+    return [ordered]@{ installed = $true; wingetId = $installedId; pythonExe = $null; pythonVersion = $null }
+  }
+  if (-not (Version-Ge $post.version $MinVersion)) {
+    throw "Python version too old after install: $($post.version) (min: $MinVersion)"
+  }
+
+  Write-Host "python installed: $($post.version)"
+  return [ordered]@{ installed = $true; wingetId = $installedId; pythonExe = $post.exe; pythonVersion = $post.version }
 }
 
 function Add-Unique([System.Collections.IList]$list, $value) {
@@ -379,13 +650,17 @@ function Remove-KindClusterViaDockerLabel([string]$cluster) {
   $docker = Resolve-DockerCli
   if (-not $docker) { return $false }
   try {
+    # If the daemon isn't reachable, don't spam errors trying to enumerate/remove resources.
+    try { & $docker @("info") 2>$null | Out-Null } catch {}
+    if ($LASTEXITCODE -ne 0) { return $false }
+
     $ok = $true
 
     $ids = & $docker @("ps","-a","-q","--filter","label=io.x-k8s.kind.cluster=$cluster") 2>$null
     $idList = @($ids | Where-Object { $_ -and $_.Trim() -ne "" })
     if ($idList.Count -gt 0) {
       Write-Host "Deleting kind containers via docker label (cluster=$cluster)..."
-      & $docker @("rm","-f") + $idList | Out-Null
+      & $docker @("rm","-f") + $idList 2>$null | Out-Null
       if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
 
@@ -393,7 +668,7 @@ function Remove-KindClusterViaDockerLabel([string]$cluster) {
     $netList = @($nets | Where-Object { $_ -and $_.Trim() -ne "" })
     if ($netList.Count -gt 0) {
       Write-Host "Deleting kind networks via docker label (cluster=$cluster)..."
-      & $docker @("network","rm") + $netList | Out-Null
+      & $docker @("network","rm") + $netList 2>$null | Out-Null
       if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
 
@@ -401,7 +676,7 @@ function Remove-KindClusterViaDockerLabel([string]$cluster) {
     $volList = @($vols | Where-Object { $_ -and $_.Trim() -ne "" })
     if ($volList.Count -gt 0) {
       Write-Host "Deleting kind volumes via docker label (cluster=$cluster)..."
-      & $docker @("volume","rm","-f") + $volList | Out-Null
+      & $docker @("volume","rm","-f") + $volList 2>$null | Out-Null
       if ($LASTEXITCODE -ne 0) { $ok = $false }
     }
 
@@ -429,10 +704,14 @@ function Cmd-Status {
   Write-Host ""
 
   Write-Host ("Docker Desktop installed: {0}" -f (Test-DockerDesktopInstalled))
+  try {
+    $bundledZip = Join-Path $PSScriptRoot "Docker Desktop Installer.zip"
+    Write-Host ("Bundled Docker Desktop installer zip present: {0}" -f (Test-Path -LiteralPath $bundledZip))
+  } catch {}
   $docker = Resolve-DockerCli
   if ($docker) {
     try {
-      & $docker @("info") | Out-Null
+      & $docker @("info") 2>$null | Out-Null
       Write-Host ("docker daemon reachable: {0}" -f ($LASTEXITCODE -eq 0))
     } catch {
       Write-Host "docker daemon reachable: false"
@@ -447,9 +726,49 @@ function Cmd-Status {
   if ($py) { Write-Host ("Python detected: {0}" -f $py) } else { Write-Host "Python detected: not found" }
   Write-Host ""
   Write-Host "Next steps (if missing):"
-  if ((Get-WSLDistros).Count -eq 0) { Write-Host "- Install Ubuntu for WSL: .\\hack\\install-wsl2.cmd" }
-  if (-not (Test-DockerDesktopInstalled)) { Write-Host "- Install Docker Desktop: .\\hack\\install-docker.cmd" }
-  if (-not (Test-WindowsHostsBlockPresent)) { Write-Host "- Apply Windows hosts: .\\hack\\dev-hosts.ps1 apply (run as Admin) or: .\\hack\\dev-env.cmd install" }
+  if ((Get-WSLDistros).Count -eq 0) { Write-Host "- Install WSL2 + Ubuntu: powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 install" }
+  if (-not (Test-DockerDesktopInstalled)) { Write-Host "- Install Docker Desktop: powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 install" }
+  if (-not (Test-WindowsHostsBlockPresent)) { Write-Host "- Apply Windows hosts: powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 hosts -HostsAction apply (run as Admin)" }
+}
+
+function Cmd-Hosts {
+  if ($HostsAction -ne "status") {
+    Ensure-Admin
+  }
+  Refresh-Session
+
+  $hostsFile = Get-WindowsHostsFile
+  $lines = Read-HostsLines $hostsFile
+
+  function Show-Resolution([string]$hostname) {
+    try {
+      $addrs = [System.Net.Dns]::GetHostAddresses($hostname) | ForEach-Object { $_.IPAddressToString }
+      if ($addrs -and $addrs.Count -gt 0) {
+        Write-Host ("{0} -> {1}" -f $hostname, ($addrs -join ", "))
+        return
+      }
+    } catch {}
+    Write-Host ("{0} -> (not resolved)" -f $hostname)
+  }
+
+  switch ($HostsAction) {
+    "status" {
+      if (Test-WindowsHostsBlockPresent) { Write-Host "hosts block: present" } else { Write-Host "hosts block: missing" }
+      Write-Host ""
+      Write-Host "Resolution:"
+      Show-Resolution "api.local.dev"
+      Show-Resolution "kong.local.dev"
+      break
+    }
+    "apply" {
+      Apply-WindowsHostsBlock
+      break
+    }
+    "remove" {
+      Remove-WindowsHostsBlock
+      break
+    }
+  }
 }
 
 function Cmd-Install {
@@ -471,7 +790,7 @@ function Cmd-Install {
 
   $preEnv = Test-Path (Join-Path $RepoRoot ".env")
   $preBin = Test-Path (Join-Path $RepoRoot "bin")
-  $preCerts = Test-Path (Join-Path $RepoRoot "hack\\certs")
+  $preCerts = Test-Path (Join-Path $RepoRoot "setup\\ubuntu-22.04\\certs")
 
   if (-not $SkipWSL2) {
     Write-Host ""
@@ -479,6 +798,7 @@ function Cmd-Install {
     $wslInstaller = Join-Path $PSScriptRoot "install-wsl2.ps1"
     $args = @()
     if ($AutoReboot) { $args += "-AutoReboot" }
+    if ($TryWithoutReboot) { $args += "-TryWithoutReboot" }
     $args += @("-Distro", $Distro)
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wslInstaller @args
     $rc = $LASTEXITCODE
@@ -502,7 +822,7 @@ function Cmd-Install {
 
     # Hard requirement for the rest of the flow: we need the requested distro to exist.
     if ((Get-WSLDistros) -notcontains $Distro) {
-      throw "WSL distro '$Distro' is not installed. Run: .\\hack\\install-wsl2.cmd -Distro $Distro, then run once: wsl -d $Distro"
+      throw "WSL distro '$Distro' is not installed. Re-run: powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 install -Distro $Distro; then run once: wsl -d $Distro"
     }
 
     if ($needsReboot) {
@@ -531,7 +851,17 @@ function Cmd-Install {
     }
 
     if (-not (Test-DockerDesktopInstalled)) {
-      throw "Docker Desktop is not installed. Run: .\\hack\\install-docker.cmd"
+      throw "Docker Desktop is not installed. Re-run: powershell -ExecutionPolicy Bypass -File setup\\windows-11-wsl2-docker-desktop\\setup.ps1 install"
+    }
+
+    # Ensure the docker daemon is reachable before proceeding to repo steps that depend on it.
+    $dockerCli = Resolve-DockerCli
+    if (-not $dockerCli) {
+      throw "docker CLI not found after Docker Desktop install. Try opening Docker Desktop once, then re-run."
+    }
+    try { & $dockerCli @("info") | Out-Null } catch {}
+    if ($LASTEXITCODE -ne 0) {
+      throw "Docker Desktop is installed but the docker daemon is not reachable yet. Open Docker Desktop, wait until it shows Running, then re-run."
     }
 
     if ($needsReboot) {
@@ -545,22 +875,10 @@ function Cmd-Install {
   if (-not $SkipPython) {
     Write-Host ""
     Write-Host "==> Step: Python (Windows)"
-    $pythonInstaller = Join-Path $PSScriptRoot "install-python.ps1"
-
-    $json = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $pythonInstaller | Out-String).Trim()
-    $rc = $LASTEXITCODE
+    $res = Ensure-PythonWindows
     Refresh-Session
-    if ($rc -ne 0) { throw "install-python failed (exit code $rc)" }
-
-    if ($json) {
-      try {
-        $res = $json | ConvertFrom-Json
-        if ($res -and $res.installed -and $res.wingetId) {
-          Add-Unique $state.windows.installedWingetIds ([string]$res.wingetId)
-        }
-      } catch {
-        Write-Host "WARN: failed to parse install-python output; skipping state update." -ForegroundColor Yellow
-      }
+    if ($res -and $res.installed -and $res.wingetId) {
+      Add-Unique $state.windows.installedWingetIds ([string]$res.wingetId)
     }
   } else {
     Write-Host "Skipping Python step (SkipPython=1)."
@@ -569,8 +887,7 @@ function Cmd-Install {
   if (-not $SkipHosts) {
     Write-Host ""
     Write-Host "==> Step: Windows hosts (api.local.dev / kong.local.dev)"
-    $hostsScript = Join-Path $PSScriptRoot "dev-hosts.ps1"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hostsScript apply
+    Apply-WindowsHostsBlock
     Refresh-Session
     $postHosts = Test-WindowsHostsBlockPresent
     if (-not $preHosts -and $postHosts) {
@@ -583,10 +900,10 @@ function Cmd-Install {
   if (-not $SkipRepo) {
     Write-Host ""
     Write-Host "==> Step: Repo bootstrap + dev (WSL)"
-    # Avoid assuming `make` exists in a fresh WSL distro: bootstrap.sh can install it.
+    # Avoid assuming `make` exists in a fresh WSL distro: repo bootstrap can install it.
     $bootstrapEnv = "BOOTSTRAP_INSTALL_MODE=local BOOTSTRAP_ENFORCE_GLOBAL_BIN=0 BOOTSTRAP_AUTO_CONFIRM=1 BOOTSTRAP_SYSCTL_PERSIST=0"
-    $rc = Invoke-WslHere "$bootstrapEnv bash ./hack/bootstrap.sh"
-    if ($rc -ne 0) { throw "bootstrap.sh failed (exit code $rc)" }
+    $rc = Invoke-WslHere "$bootstrapEnv bash ./setup/ubuntu-22.04/setup.sh bootstrap"
+    if ($rc -ne 0) { throw "repo bootstrap failed (exit code $rc)" }
 
     $rc = Invoke-WslHere "make dev"
     if ($rc -ne 0) { throw "make dev failed (exit code $rc)" }
@@ -602,22 +919,14 @@ function Cmd-Install {
     # Record repo artifacts created by this run.
     if (-not $preEnv -and (Test-Path (Join-Path $RepoRoot ".env"))) { Add-Unique $state.repo.createdPaths ".env" }
     if (-not $preBin -and (Test-Path (Join-Path $RepoRoot "bin"))) { Add-Unique $state.repo.createdPaths "bin" }
-    if (-not $preCerts -and (Test-Path (Join-Path $RepoRoot "hack\\certs"))) { Add-Unique $state.repo.createdPaths "hack/certs" }
+    if (-not $preCerts -and (Test-Path (Join-Path $RepoRoot "setup\\ubuntu-22.04\\certs"))) { Add-Unique $state.repo.createdPaths "setup/ubuntu-22.04/certs" }
     $ipWhitelist = Join-Path $RepoRoot "k8s\\overlays\\dev\\kong\\ip-whitelist.yaml"
     if (Test-Path $ipWhitelist) { Add-Unique $state.repo.createdPaths "k8s/overlays/dev/kong/ip-whitelist.yaml" }
     $kongUser = Join-Path $RepoRoot ".git\\dev-kong-user"
     if (Test-Path $kongUser) { Add-Unique $state.repo.createdPaths ".git/dev-kong-user" }
 
-    # Record cluster if it exists.
-    try {
-      $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "wsl-here.ps1") -Distro $Distro -Command "kind get clusters 2>/dev/null || true" 2>$null
-      if ($out) {
-        foreach ($line in $out) {
-          $c = $line.ToString().Trim()
-          if ($c) { Add-Unique $state.repo.kindClusters $c }
-        }
-      }
-    } catch {}
+    # Record default cluster name (best-effort). If kind never started, this is still useful for uninstall defaults.
+    Add-Unique $state.repo.kindClusters $KindClusterName
   } else {
     Write-Host "Skipping repo step (SkipRepo=1)."
   }
@@ -650,7 +959,10 @@ function Cmd-Uninstall {
   Write-Host ""
   Write-Host "==> Step: Stop port-forward / delete kind cluster (best-effort)"
   if (-not $SkipRepo) {
-    try { Invoke-WslHere "make dev-port-stop" | Out-Null } catch {}
+    try {
+      # Avoid noisy errors on machines where the repo never reached the "make installed" stage.
+      Invoke-WslHere "if command -v make >/dev/null 2>&1; then make dev-port-stop; fi" | Out-Null
+    } catch {}
 
     $clusters = @()
     if ($state.repo -and $state.repo.kindClusters -and $state.repo.kindClusters.Count -gt 0) {
@@ -670,11 +982,17 @@ function Cmd-Uninstall {
     # Safe-ish prune for project images.
     $docker = Resolve-DockerCli
     if ($docker) {
-      try { & $docker @("builder","prune","-f") | Out-Null } catch {}
-      try { & $docker @("image","prune","-f","--filter","label=project=reliable-message-api") | Out-Null } catch {}
+      $dockerReady = $false
+      try { & $docker @("info") 2>$null | Out-Null; $dockerReady = ($LASTEXITCODE -eq 0) } catch { $dockerReady = $false }
+      if ($dockerReady) {
+        try { & $docker @("builder","prune","-f") 2>$null | Out-Null } catch {}
+        try { & $docker @("image","prune","-f","--filter","label=project=reliable-message-api") 2>$null | Out-Null } catch {}
+      }
       if ($NukeDocker) {
         Write-Host "Running docker system prune -af (NukeDocker=1)..."
-        try { & $docker @("system","prune","-af") | Out-Null } catch {}
+        if ($dockerReady) {
+          try { & $docker @("system","prune","-af") 2>$null | Out-Null } catch {}
+        }
       }
     }
   } else {
@@ -686,8 +1004,7 @@ function Cmd-Uninstall {
   if (-not $SkipHosts) {
     Write-Host ""
     Write-Host "==> Step: Remove Windows hosts block"
-    $hostsScript = Join-Path $PSScriptRoot "dev-hosts.ps1"
-    try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hostsScript remove } catch { Write-Host "WARN: hosts removal failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+    try { Remove-WindowsHostsBlock } catch { Write-Host "WARN: hosts removal failed: $($_.Exception.Message)" -ForegroundColor Yellow }
     Refresh-ExplorerBestEffort "hosts"
   } else {
     Write-Host "Skipping hosts removal (SkipHosts=1)."
@@ -699,7 +1016,7 @@ function Cmd-Uninstall {
   Write-Host "==> Step: mkcert uninstall (best-effort)"
   $shouldUninstallMkcert = $PurgeAll
   if (-not $shouldUninstallMkcert) {
-    $shouldUninstallMkcert = ($state.repo -and $state.repo.createdPaths -and ($state.repo.createdPaths -contains "hack/certs"))
+    $shouldUninstallMkcert = ($state.repo -and $state.repo.createdPaths -and ($state.repo.createdPaths -contains "setup/ubuntu-22.04/certs"))
   }
   if ($shouldUninstallMkcert) {
     if (-not $SkipRepo) {
@@ -721,7 +1038,7 @@ function Cmd-Uninstall {
   Write-Host ""
   Write-Host "==> Step: Remove repo-local artifacts"
   Remove-PathBestEffort ".env"
-  Remove-PathBestEffort "hack/certs"
+  Remove-PathBestEffort "setup/ubuntu-22.04/certs"
   Remove-PathBestEffort "bin"
   Remove-PathBestEffort "k8s/overlays/dev/kong/ip-whitelist.yaml"
   Remove-PathBestEffort ".git/dev-kong-user"
@@ -764,6 +1081,42 @@ function Cmd-Uninstall {
         try { $null = Invoke-WingetUninstall $id } catch { Write-Host "WARN: failed to uninstall ${id}: $($_.Exception.Message)" -ForegroundColor Yellow }
       }
       if ($didWingetUninstall) { Refresh-ExplorerBestEffort "winget packages" }
+    }
+
+    function Get-WingetPythonIds {
+      if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { return @() }
+      try {
+        $out = & winget list 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $out) { return @() }
+        $ids = New-Object System.Collections.Generic.List[string]
+        foreach ($line in @($out)) {
+          $t = ($line.ToString()).Trim()
+          if (-not $t) { continue }
+          # Example ID: Python.Python.3.12
+          $m = [regex]::Match($t, "\\bPython\\.Python\\.[0-9]+\\.[0-9]+\\b")
+          if ($m.Success) { Add-Unique $ids $m.Value }
+        }
+        return @($ids)
+      } catch {
+        return @()
+      }
+    }
+
+    # If requested, also try to remove Python even when state is missing/out of date.
+    if ($PurgeAll -and -not $SkipPython) {
+      Write-Host ""
+      Write-Host "==> Step: Purge Python (best-effort, PurgeAll=1)"
+
+      $pyIds = @(Get-WingetPythonIds)
+      if (-not $pyIds -or $pyIds.Count -eq 0) {
+        $pyIds = @("Python.Python.3.14","Python.Python.3.13","Python.Python.3.12","Python.Python.3.11")
+      }
+
+      foreach ($id in @($pyIds)) {
+        try { $null = Invoke-WingetUninstall $id } catch {}
+      }
+      Refresh-ExplorerBestEffort "Python (winget)"
+      Refresh-Session
     }
 
     if (-not $SkipWSL2) {
@@ -867,7 +1220,7 @@ function Cmd-Uninstall {
   Write-Host ""
   Write-Host "dev-env uninstall completed."
   if ($rebootRequired) {
-    Write-Host "Reinicio necessario: reinicie o computador para que as desinstalacoes tenham efeito completo." -ForegroundColor Yellow
+    Write-Host "Reboot required: reboot the computer for the uninstalls to take full effect." -ForegroundColor Yellow
   }
 }
 
@@ -875,4 +1228,5 @@ switch ($Command) {
   "status" { Cmd-Status; break }
   "install" { Cmd-Install; break }
   "uninstall" { Cmd-Uninstall; break }
+  "hosts" { Cmd-Hosts; break }
 }
