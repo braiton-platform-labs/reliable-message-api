@@ -20,7 +20,7 @@ class Message(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    idempotency_keys: Mapped[list["IdempotencyKey"]] = relationship(
+    idempotency_keys: Mapped[list[IdempotencyKey]] = relationship(
         back_populates="message",
         cascade="all, delete-orphan",
     )

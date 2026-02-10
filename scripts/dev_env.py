@@ -8,7 +8,6 @@ import secrets
 import string
 import sys
 
-
 REQUIRED_KEYS: tuple[str, ...] = (
     "DATABASE_URL",
     "REQUIRE_API_KEY",
@@ -182,7 +181,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Local dev env helpers for reliable-message-api")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp_init = sub.add_parser("init", help="Create the env file (if missing) with local dev defaults")
+    sp_init = sub.add_parser(
+        "init",
+        help="Create the env file (if missing) with local dev defaults",
+    )
     sp_init.add_argument("--env-file", required=True)
 
     sp_add = sub.add_parser("kong-user-add", help="Add/replace a Kong RBAC user in KONG_RBAC_USERS")

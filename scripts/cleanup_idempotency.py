@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, delete
 from sqlalchemy.orm import Session
@@ -14,7 +14,7 @@ def main() -> None:
         "DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/messages"
     )
     ttl_hours = int(os.getenv("IDEMPOTENCY_TTL_HOURS", "24"))
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=ttl_hours)
 
     engine = create_engine(database_url)
     with Session(engine) as session:
