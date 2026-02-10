@@ -2,9 +2,9 @@
 	dev-up dev-fg dev-reload dev-rollout dev-rollout-all dev-port dev-port-bg dev-port-stop dev-port-status dev-port-logs dev-reset dev-verify dev dev-status \
 	dev-logs dev-psql dev-port-kong-admin dev-tls dev-kong-whitelist dev-kong-user dev-kong-user-remove dev-kong-crds-install \
 	dev-hosts-status dev-hosts-apply dev-hosts-remove dev-hosts-status-win dev-hosts-apply-win dev-hosts-remove-win \
-	k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin doctor bootstrap bootstrap-full first-run
+	dev-metrics-install k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin doctor bootstrap bootstrap-full first-run
 
-TOOL_VERSIONS_FILE ?= hack/tool-versions.env
+TOOL_VERSIONS_FILE ?= setup/ubuntu-22.04/tool-versions.env
 -include $(TOOL_VERSIONS_FILE)
 export KUSTOMIZE_VERSION KUBECONFORM_VERSION
 
@@ -29,7 +29,7 @@ DEV_WAIT_TIMEOUT ?= 300s
 
 BIN_DIR ?= bin
 
-# Prefer repo-local tools installed into ./bin (e.g., via `make bootstrap` / `./hack/bootstrap.sh`).
+# Prefer repo-local tools installed into ./bin (e.g., via `make bootstrap` / `./setup/ubuntu-22.04/setup.sh bootstrap`).
 export PATH := $(BIN_DIR):$(PATH)
 
 # Cross-platform helpers (Windows uses .exe).
@@ -69,31 +69,30 @@ help:
 	@echo "  make dev-clean           Clean dev namespace, kind cluster, and build cache"
 
 doctor:
-	@./hack/doctor.sh
+	@./setup/ubuntu-22.04/setup.sh doctor
 
 # Lightweight bootstrap for onboarding: installs pinned binaries into ./bin without changing sysctl
 # or running apt maintenance (no sudo required for most machines).
 bootstrap:
 	@set -e; \
 	if [ "$(EXE)" = ".exe" ]; then \
-	  BOOTSTRAP_INSTALL_MODE=local \
-	    BOOTSTRAP_ENFORCE_GLOBAL_BIN=0 \
-	    BOOTSTRAP_APT_MAINTENANCE=0 \
-	    BOOTSTRAP_TUNE_SYSCTL=0 \
-	    BOOTSTRAP_SYSCTL_PERSIST=0 \
-	    cmd.exe /c hack\\bootstrap.cmd; \
+	  echo "Windows host bootstrap via Makefile is not supported for this repo."; \
+	  echo "Use the supported Windows workflow:"; \
+	  echo "  powershell -ExecutionPolicy Bypass -File setup/windows-11-wsl2-docker-desktop/setup.ps1 install"; \
+	  echo "Or run make inside WSL (Ubuntu 22.04)."; \
+	  exit 1; \
 	else \
 	  BOOTSTRAP_INSTALL_MODE=local \
 	    BOOTSTRAP_ENFORCE_GLOBAL_BIN=0 \
 	    BOOTSTRAP_APT_MAINTENANCE=0 \
 	    BOOTSTRAP_TUNE_SYSCTL=0 \
 	    BOOTSTRAP_SYSCTL_PERSIST=0 \
-	    ./hack/bootstrap.sh; \
+	    ./setup/ubuntu-22.04/setup.sh bootstrap; \
 	fi
 
 # Full bootstrap (may require sudo and may tune sysctl for kind stability).
 bootstrap-full:
-	@./hack/bootstrap.sh
+	@./setup/ubuntu-22.04/setup.sh bootstrap
 
 first-run:
 	@$(MAKE) bootstrap
@@ -258,6 +257,28 @@ dev-context:
 			kubectl -n local-path-storage rollout status deployment/local-path-provisioner; \
 			kubectl patch storageclass local-path -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class":"true"}}}' >/dev/null; \
 		fi
+	@$(MAKE) dev-metrics-install >/dev/null
+
+dev-metrics-install:
+	@set -e; \
+	if kubectl -n kube-system get deployment/metrics-server >/dev/null 2>&1; then \
+		exit 0; \
+	fi; \
+	echo "installing metrics-server (enables: kubectl top, Lens Overview metrics)"; \
+	kubectl apply -f k8s/vendor/metrics-server.v0.7.2.yaml >/dev/null; \
+	kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s >/dev/null; \
+	# Wait for the aggregated API to report available. \
+	i=0; \
+	while [ $$i -lt 60 ]; do \
+		st=$$(kubectl get apiservice v1beta1.metrics.k8s.io -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || true); \
+		if [ "$$st" = "True" ]; then \
+			exit 0; \
+		fi; \
+		i=$$((i+1)); \
+		sleep 2; \
+	done; \
+	echo "WARN: metrics.k8s.io APIService not Available yet (Lens may show metrics after a short delay)."; \
+	exit 0
 
 dev-env-init:
 	@$(PYTHON) scripts/dev_env.py init --env-file "$(ENV_FILE)"
@@ -342,9 +363,9 @@ dev-port: dev-context
 		kubectl -n dev get pods -o wide || true; \
 		exit 1; \
 	}
-	@echo "==> Port-forward ativo em http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT) e https://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTPS_PORT) (Ctrl+C para parar)."
-	@echo "==> Teste HTTP (outro terminal): curl -H 'Host: api.local.dev' http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT)/health"
-	@echo "==> Teste HTTPS: curl -sk --resolve api.local.dev:$(DEV_HTTPS_PORT):$(DEV_PORT_FORWARD_ADDR) -H 'Host: api.local.dev' https://api.local.dev:$(DEV_HTTPS_PORT)/health"
+	@echo "==> Port-forward active at http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT) and https://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTPS_PORT) (Ctrl+C to stop)."
+	@echo "==> HTTP test (another terminal): curl -H 'Host: api.local.dev' http://$(DEV_PORT_FORWARD_ADDR):$(DEV_HTTP_PORT)/health"
+	@echo "==> HTTPS test: curl -sk --resolve api.local.dev:$(DEV_HTTPS_PORT):$(DEV_PORT_FORWARD_ADDR) -H 'Host: api.local.dev' https://api.local.dev:$(DEV_HTTPS_PORT)/health"
 	kubectl -n dev port-forward --address $(DEV_PORT_FORWARD_ADDR) svc/kong-proxy $(DEV_HTTP_PORT):80 $(DEV_HTTPS_PORT):443
 
 dev-port-bg: dev-context
@@ -447,22 +468,22 @@ dev-port-kong-admin: dev-context
 	kubectl -n dev port-forward svc/kong-admin 8001:8001 8002:8002
 
 dev-hosts-status:
-	@./hack/dev-hosts.sh status
+	@./setup/ubuntu-22.04/setup.sh hosts status
 
 dev-hosts-apply:
-	@./hack/dev-hosts.sh apply
+	@./setup/ubuntu-22.04/setup.sh hosts apply
 
 dev-hosts-remove:
-	@./hack/dev-hosts.sh remove
+	@./setup/ubuntu-22.04/setup.sh hosts remove
 
 dev-hosts-status-win:
-	@powershell.exe -ExecutionPolicy Bypass -File hack/dev-hosts.ps1 status
+	@powershell.exe -ExecutionPolicy Bypass -File setup/windows-11-wsl2-docker-desktop/setup.ps1 hosts -HostsAction status
 
 dev-hosts-apply-win:
-	@powershell.exe -ExecutionPolicy Bypass -File hack/dev-hosts.ps1 apply
+	@powershell.exe -ExecutionPolicy Bypass -File setup/windows-11-wsl2-docker-desktop/setup.ps1 hosts -HostsAction apply
 
 dev-hosts-remove-win:
-	@powershell.exe -ExecutionPolicy Bypass -File hack/dev-hosts.ps1 remove
+	@powershell.exe -ExecutionPolicy Bypass -File setup/windows-11-wsl2-docker-desktop/setup.ps1 hosts -HostsAction remove
 
 dev-reset: dev-context
 	-$(MAKE) dev-port-stop >/dev/null 2>&1 || true
@@ -489,7 +510,7 @@ dev-secrets-apply: dev-context dev-env-init
 	@echo "==> app-secrets applied."
 
 dev-tls: dev-context
-	@cert_dir="hack/certs"; \
+	@cert_dir="setup/ubuntu-22.04/certs"; \
 	if ! command -v mkcert >/dev/null 2>&1; then \
 		echo "WARN: mkcert not found; skipping TLS secret. Install mkcert and run: make dev-tls"; \
 		exit 0; \
@@ -499,8 +520,8 @@ dev-tls: dev-context
 	mkcert -cert-file "$$cert_dir/kong-local.crt" -key-file "$$cert_dir/kong-local.key" api.local.dev kong.local.dev >/dev/null; \
 	echo "certs written to $$cert_dir"; \
 	kubectl -n dev create secret tls kong-local-tls \
-		--cert=hack/certs/kong-local.crt \
-		--key=hack/certs/kong-local.key \
+		--cert=setup/ubuntu-22.04/certs/kong-local.crt \
+		--key=setup/ubuntu-22.04/certs/kong-local.key \
 		--dry-run=client -o yaml | kubectl apply -f -
 
 dev-kong-crds-install: dev-context
@@ -688,7 +709,7 @@ dev-up:
 	$(MAKE) dev-kong-whitelist
 	$(MAKE) dev-apply
 	$(MAKE) dev-rollout
-	@echo "==> Dev pronto."
+	@echo "==> Dev environment ready."
 	@echo "==> Port-forward (bg): make dev-port-bg"
 	@echo "==> Port-forward (fg): make dev-port"
 

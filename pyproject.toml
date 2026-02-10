@@ -29,7 +29,7 @@ build-backend = "setuptools.build_meta"
 include-package-data = false
 
 [tool.setuptools.packages.find]
-# Avoid setuptools auto-discovering non-Python top-level dirs (k8s/, hack/, docker/, etc.).
+# Avoid setuptools auto-discovering non-Python top-level dirs (k8s/, setup/, docker/, etc.).
 include = ["app*"]
 exclude = ["tests*", "k8s*", "hack*", "docker*", "scripts*"]
 

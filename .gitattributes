@@ -1,0 +1,6 @@
+# Normalize line endings to avoid bash parsing errors inside WSL/Linux.
+*.sh text eol=lf
+*.env text eol=lf
+
+# Keep PowerShell scripts with CRLF for best Windows compatibility/readability.
+*.ps1 text eol=crlf

@@ -8,10 +8,142 @@ Param(
   [string]$UserName = $null,
 
   # Optional: enable systemd in the WSL distro via /etc/wsl.conf (requires wsl --shutdown).
-  [switch]$EnableSystemd
+  [switch]$EnableSystemd,
+
+  # Best-effort: try to proceed without reboot after enabling Windows optional features.
+  # This is not guaranteed to work on all machines; if it still can't install the distro,
+  # the script will stop with exit code 3010 (reboot required).
+  [switch]$TryWithoutReboot
 )
 
 $ErrorActionPreference = "Stop"
+
+$script:RebootRecommended = $false
+
+function Write-InstallLog([string]$message) {
+  try {
+    $dir = Join-Path $PSScriptRoot ".logs"
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $path = Join-Path $dir "install-wsl2.log"
+    $ts = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+    Add-Content -LiteralPath $path -Value ("[{0}] {1}" -f $ts, $message) -Encoding UTF8
+  } catch {
+    # Best-effort only.
+  }
+}
+
+function Refresh-ExplorerBestEffort([string]$reason = "") {
+  try {
+    if (-not (Get-Process -Name "explorer" -ErrorAction SilentlyContinue)) { return }
+
+    $suffix = ""
+    if ($reason) { $suffix = " ($reason)" }
+    Write-Host ("ATTENTION: Refreshing Windows Explorer (explorer.exe) to apply changes{0}..." -f $suffix) -ForegroundColor Blue
+
+    # Broadcast environment/settings change to Explorer + other processes.
+    if (-not ("RmaWin32" -as [type])) {
+      Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class RmaWin32 {
+  [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)]
+  public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+}
+'@ | Out-Null
+    }
+
+    [UIntPtr]$result = [UIntPtr]::Zero
+    [void][RmaWin32]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 0x2, 5000, [ref]$result)
+
+    # Refresh open Explorer windows (best-effort).
+    try {
+      $shell = New-Object -ComObject Shell.Application
+      foreach ($w in @($shell.Windows())) {
+        try { $w.Refresh() } catch {}
+      }
+    } catch {}
+  } catch {
+    # Best-effort only.
+  }
+}
+
+function Invoke-WslUpdateBestEffort {
+  if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return }
+  try {
+    & wsl.exe --update --web-download | Out-Null
+    if ($LASTEXITCODE -eq 0) { return }
+    throw "wsl --update --web-download exit code $LASTEXITCODE"
+  } catch {
+    try { & wsl.exe --update | Out-Null } catch {}
+  }
+}
+
+function Invoke-WslNoRebootActivationBestEffort([string]$reason = "") {
+  try {
+    $msg = "Best-effort: trying to activate WSL without reboot"
+    if ($reason) { $msg += " ($reason)" }
+    Write-Host $msg -ForegroundColor Yellow
+    Write-InstallLog $msg
+
+    try {
+      if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
+        & wsl.exe --shutdown | Out-Null
+      }
+    } catch {}
+
+    try { Invoke-WslUpdateBestEffort } catch {}
+
+    try {
+      Get-Service LxssManager,vmcompute,WslService -ErrorAction SilentlyContinue |
+        Restart-Service -Force -ErrorAction SilentlyContinue
+    } catch {}
+
+    Refresh-ExplorerBestEffort "wsl"
+  } catch {
+    # Best-effort only.
+  }
+}
+
+function Resolve-DistroLauncherExe([string]$distroName) {
+  # Some WSL distros are installed as Windows Store apps and only become visible in `wsl -l`
+  # after the app's first-run initialization. Those apps usually ship a launcher exe that
+  # supports non-interactive initialization via `install --root`.
+  switch ($distroName) {
+    "Ubuntu-22.04" { return "ubuntu2204.exe" }
+    "Ubuntu-20.04" { return "ubuntu2004.exe" }
+    "Ubuntu-24.04" { return "ubuntu2404.exe" }
+    "Ubuntu" { return "ubuntu.exe" }
+    default { return $null }
+  }
+}
+
+function Try-InitializeDistroViaLauncher([string]$distroName) {
+  $launcher = Resolve-DistroLauncherExe $distroName
+  if (-not $launcher) { return $false }
+
+  $cmd = Get-Command $launcher -ErrorAction SilentlyContinue
+  if (-not $cmd -or $cmd.CommandType -ne "Application") { return $false }
+
+  Write-Host "Detected installed distro launcher '$launcher'. Initializing WSL distro registration (install --root)..." -ForegroundColor Yellow
+  Write-InstallLog "Initializing distro via launcher: $launcher install --root"
+
+  try {
+    & $cmd.Source install --root
+    $rc = $LASTEXITCODE
+    if ($rc -ne 0) {
+      Write-Host "WARN: '$launcher install --root' failed (exit code $rc)." -ForegroundColor Yellow
+      Write-InstallLog "Launcher init failed (exit code $rc)."
+      return $false
+    }
+  } catch {
+    Write-Host "WARN: '$launcher install --root' failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-InstallLog "Launcher init failed: $($_.Exception.Message)"
+    return $false
+  }
+
+  $post = Get-InstalledWSLDistros -All
+  return ($post -contains $distroName)
+}
 
 function Normalize-WslTextLine([string]$s) {
   if ($null -eq $s) { return "" }
@@ -100,14 +232,22 @@ function Ensure-WSL2Prereqs {
   $restartNeeded = (Ensure-WindowsOptionalFeatureEnabled "VirtualMachinePlatform") -or $restartNeeded
 
   if ($restartNeeded) {
-    Write-Host "WSL2 prerequisites enabled, but a reboot is required." -ForegroundColor Yellow
-    if ($AutoReboot) {
-      Write-Host "Rebooting now..."
-      Restart-Computer -Force
-      return
+    $script:RebootRecommended = $true
+    if ($TryWithoutReboot) {
+      Write-Host ""
+      Write-Host "WSL2 prerequisites were just enabled and a reboot is RECOMMENDED." -ForegroundColor Yellow
+      Write-Host "Continuing without reboot (best-effort) because -TryWithoutReboot was provided..." -ForegroundColor Yellow
+      Write-InstallLog "Reboot recommended after enabling Windows optional features (continuing without reboot)."
+
+      # User-requested best-effort "no reboot" tactics.
+      Invoke-WslNoRebootActivationBestEffort "after enabling optional features"
+    } else {
+      Write-Host ""
+      Write-Host "WSL2 prerequisites were just enabled, but a reboot is REQUIRED before installing the distro." -ForegroundColor Yellow
+      Write-Host "Reboot Windows, then re-run the same command (or re-run with -TryWithoutReboot to attempt best-effort)." -ForegroundColor Yellow
+      Write-InstallLog "Reboot required after enabling Windows optional features; stopping with 3010."
+      exit 3010
     }
-    Write-Host "Reboot Windows, then re-run: .\\hack\\install-wsl2.cmd" -ForegroundColor Yellow
-    exit 3010
   }
 }
 
@@ -133,10 +273,11 @@ function Get-InstalledWSLDistros {
 function Ensure-WSL2Defaults {
   if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
     Write-Host "wsl.exe not found after enabling features. Reboot and re-run." -ForegroundColor Yellow
+    Write-InstallLog "wsl.exe not found; reboot required before continuing."
     exit 3010
   }
 
-  try { wsl.exe --update | Out-Null } catch {}
+  try { Invoke-WslUpdateBestEffort } catch {}
   try { wsl.exe --set-default-version 2 | Out-Null } catch {}
 }
 
@@ -353,6 +494,17 @@ function Ensure-Distro([string]$name) {
     return $distros
   }
 
+  # User-requested best-effort "no reboot" tactics before starting install.
+  Invoke-WslNoRebootActivationBestEffort "before installing distro '$name'"
+
+  # If the distro app is already installed but the distro isn't registered yet, WSL can remain empty and
+  # our "wait for distro to appear" loop will spin forever. Kick first-run initialization in a
+  # non-interactive way when possible.
+  if (Try-InitializeDistroViaLauncher $name) {
+    $distros = Get-InstalledWSLDistros
+    if ($distros -contains $name) { return $distros }
+  }
+
   Write-Host "Installing WSL distro: $name"
   $lastErr = $null
   try {
@@ -378,7 +530,15 @@ function Ensure-Distro([string]$name) {
     Write-Host "You can install a distro manually:" -ForegroundColor Yellow
     Write-Host "  wsl --list --online"
     Write-Host "  wsl --install -d $name --web-download"
+    Write-InstallLog "Distro install failed: $lastErr"
     return @()
+  }
+
+  # If WSL reported success but the distro still isn't listed, attempt the launcher-based init once
+  # before falling back to the longer wait loop.
+  $preWait = Get-InstalledWSLDistros -All
+  if ($preWait -notcontains $name) {
+    $null = Try-InitializeDistroViaLauncher $name
   }
 
   # Wait for the distro to actually show up and become runnable (wsl can return early).
@@ -387,6 +547,13 @@ function Ensure-Distro([string]$name) {
     Write-Host "ERROR: timed out waiting for WSL distro '$name' to finish installing." -ForegroundColor Red
     Write-Host "Current WSL distros (including installing/uninstalling):" -ForegroundColor Yellow
     try { wsl.exe -l -v --all } catch {}
+    Write-InstallLog "Timed out waiting for distro '$name' to become ready."
+    if ($script:RebootRecommended) {
+      Write-Host ""
+      Write-Host "A reboot is likely required for WSL2 feature activation. Reboot Windows and re-run." -ForegroundColor Yellow
+      Write-InstallLog "Stopping with 3010 after timeout and reboot recommendation."
+      exit 3010
+    }
     return @()
   }
 
@@ -444,4 +611,10 @@ Write-Host ""
 Write-Host "WSL2 setup completed."
 Write-Host "Verify: wsl -l -v"
 Write-Host "Open distro: wsl -d $Distro"
-Write-Host "Open a shell in this repo: .\\hack\\wsl-here.cmd"
+Write-Host "Open a shell (then cd into the repo): wsl -d $Distro"
+
+if ($script:RebootRecommended) {
+  Write-Host ""
+  Write-Host "WARNING: For best results, reboot Windows after this WSL2 setup." -ForegroundColor Yellow
+  Write-InstallLog "Reboot recommended for full effectiveness after WSL2 setup."
+}

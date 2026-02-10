@@ -13,6 +13,8 @@ __pycache__/
 htmlcov/
 .DS_Store
 bin/
-hack/certs/
-hack/.state/
+setup/ubuntu-22.04/certs/
+setup/windows-11-wsl2-docker-desktop/.state/
+setup/windows-11-wsl2-docker-desktop/.logs/
+setup/windows-11-wsl2-docker-desktop/*.zip
 k8s/overlays/dev/kong/ip-whitelist.yaml

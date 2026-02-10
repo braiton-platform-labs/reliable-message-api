@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN_DIR="${BIN_DIR:-${ROOT_DIR}/bin}"
-VERSIONS_FILE="${VERSIONS_FILE:-${ROOT_DIR}/hack/tool-versions.env}"
+VERSIONS_FILE="${VERSIONS_FILE:-${ROOT_DIR}/setup/ubuntu-22.04/tool-versions.env}"
+
+# Prefer repo-local tools when present (kubectl/kind/jq/etc installed into ${BIN_DIR}).
+case ":${PATH}:" in
+  *":${BIN_DIR}:"*) ;;
+  *) export PATH="${BIN_DIR}:${PATH}" ;;
+esac
 
 if [ -f "${VERSIONS_FILE}" ]; then
   # shellcheck disable=SC1090
@@ -30,6 +36,7 @@ UNZIP_MIN_VERSION="${UNZIP_MIN_VERSION:-6.0}"
 BOOTSTRAP_INSTALL_MODE="${BOOTSTRAP_INSTALL_MODE:-system}"
 BOOTSTRAP_GLOBAL_BIN_DIR="${BOOTSTRAP_GLOBAL_BIN_DIR:-/usr/local/bin}"
 BOOTSTRAP_ENFORCE_GLOBAL_BIN="${BOOTSTRAP_ENFORCE_GLOBAL_BIN:-1}"
+BOOTSTRAP_DOCKER_REQUIRED="${BOOTSTRAP_DOCKER_REQUIRED:-1}"
 BOOTSTRAP_APT_MAINTENANCE="${BOOTSTRAP_APT_MAINTENANCE:-1}"
 BOOTSTRAP_APT_UPGRADE="${BOOTSTRAP_APT_UPGRADE:-0}"
 BOOTSTRAP_APT_FULL_UPGRADE="${BOOTSTRAP_APT_FULL_UPGRADE:-0}"
@@ -269,7 +276,7 @@ print_summary() {
   log "summary:"
   local s
   for s in "${SUMMARY_ORDER[@]}"; do
-    log "  ${s}:${SUMMARY_MAP[${s}]}"
+    log "  ${s}:${SUMMARY_MAP[${s}]-MISSING}"
   done
 }
 
@@ -305,50 +312,54 @@ finalize() {
     return
   fi
   BOOTSTRAP_PRINTED=1
-  if [ "${SUMMARY_MAP[apt-system]}" = "PENDING" ]; then
+  # Non-bootstrap subcommands (doctor/hosts) do not initialize the summary map.
+  if [ "${#SUMMARY_MAP[@]}" -eq 0 ]; then
+    return
+  fi
+  if [ "${SUMMARY_MAP[apt-system]-}" = "PENDING" ]; then
     if have_cmd apt-get; then
       summary_set "apt-system" "WARN"
     else
       summary_set "apt-system" "OK"
     fi
   fi
-  if [ "${SUMMARY_MAP[network-tools]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[network-tools]-}" = "PENDING" ]; then
     summary_set "network-tools" "FAIL"
   fi
-  if [ "${SUMMARY_MAP[curl]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[curl]-}" = "PENDING" ]; then
     status_min "curl" "$(get_curl_version || true)" "${CURL_MIN_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[wget]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[wget]-}" = "PENDING" ]; then
     status_min "wget" "$(get_wget_version || true)" "${WGET_MIN_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[unzip]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[unzip]-}" = "PENDING" ]; then
     status_min "unzip" "$(get_unzip_version || true)" "${UNZIP_MIN_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[git]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[git]-}" = "PENDING" ]; then
     status_min "git" "$(get_git_version || true)" "${GIT_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[make]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[make]-}" = "PENDING" ]; then
     status_min "make" "$(get_make_version || true)" "${MAKE_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[python3]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[python3]-}" = "PENDING" ]; then
     status_min "python3" "$(get_python_version || true)" "${PYTHON_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[openssl]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[openssl]-}" = "PENDING" ]; then
     status_min "openssl" "$(get_openssl_version || true)" "${OPENSSL_MIN_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[docker]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[docker]-}" = "PENDING" ]; then
     status_min "docker" "$(get_docker_version || true)" "${DOCKER_ENGINE_MIN_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[mkcert]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[mkcert]-}" = "PENDING" ]; then
     status_exact "mkcert" "$(get_mkcert_version || true)" "${MKCERT_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[kubectl]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[kubectl]-}" = "PENDING" ]; then
     status_exact "kubectl" "$(get_kubectl_version "${BIN_DIR}/kubectl" || true)" "${KUBECTL_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[kind]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[kind]-}" = "PENDING" ]; then
     status_exact "kind" "$(get_kind_version "${BIN_DIR}/kind" || true)" "${KIND_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[kube-context]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[kube-context]-}" = "PENDING" ]; then
     if ! have_cmd kubectl; then
       summary_set "kube-context" "WARN"
     elif [ "$(get_current_kube_context || true)" = "${BOOTSTRAP_EXPECTED_KUBE_CONTEXT}" ]; then
@@ -357,13 +368,13 @@ finalize() {
       summary_set "kube-context" "WARN"
     fi
   fi
-  if [ "${SUMMARY_MAP[jq]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[jq]-}" = "PENDING" ]; then
     status_exact "jq" "$(get_jq_version "${BIN_DIR}/jq" || true)" "${JQ_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[kustomize]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[kustomize]-}" = "PENDING" ]; then
     status_exact "kustomize" "$(get_kustomize_version "${BIN_DIR}/kustomize" || true)" "${KUSTOMIZE_VERSION}"
   fi
-  if [ "${SUMMARY_MAP[kubeconform]}" = "PENDING" ]; then
+  if [ "${SUMMARY_MAP[kubeconform]-}" = "PENDING" ]; then
     status_exact "kubeconform" "$(get_kubeconform_version "${BIN_DIR}/kubeconform" || true)" "${KUBECONFORM_VERSION}"
   fi
   log "final versions:"
@@ -392,8 +403,6 @@ finalize() {
     log "bootstrap completed with failures (set BOOTSTRAP_STRICT=1 to fail)"
   fi
 }
-
-trap 'finalize $?' EXIT
 
 ensure_path_entry() {
   local entry="$1"
@@ -1514,12 +1523,14 @@ main() {
 
   ensure_bin_dir
   summary_init
+  trap 'finalize $?' EXIT
   log "runtime user: $(id -un) (uid=$(id -u))"
   log "target versions (security/compat): kubectl=${KUBECTL_VERSION}, kind=${KIND_VERSION}, jq=${JQ_VERSION}, mkcert=${MKCERT_VERSION}, kustomize=${KUSTOMIZE_VERSION}, kubeconform=${KUBECONFORM_VERSION}, docker>=${DOCKER_ENGINE_MIN_VERSION}, git>=${GIT_VERSION}, make>=${MAKE_VERSION}, python3>=${PYTHON_VERSION}, openssl>=${OPENSSL_MIN_VERSION}, curl>=${CURL_MIN_VERSION}, wget>=${WGET_MIN_VERSION}, unzip>=${UNZIP_MIN_VERSION}"
   log "global binary mode: BOOTSTRAP_ENFORCE_GLOBAL_BIN=${BOOTSTRAP_ENFORCE_GLOBAL_BIN}, BOOTSTRAP_GLOBAL_BIN_DIR=${BOOTSTRAP_GLOBAL_BIN_DIR}"
   log "kube context controls: BOOTSTRAP_EXPECTED_KUBE_CONTEXT=${BOOTSTRAP_EXPECTED_KUBE_CONTEXT}, BOOTSTRAP_AUTO_KUBECONTEXT=${BOOTSTRAP_AUTO_KUBECONTEXT}"
   log "sysctl controls: BOOTSTRAP_TUNE_SYSCTL=${BOOTSTRAP_TUNE_SYSCTL}, BOOTSTRAP_SYSCTL_PERSIST=${BOOTSTRAP_SYSCTL_PERSIST}"
   log "apt maintenance controls: BOOTSTRAP_APT_MAINTENANCE=${BOOTSTRAP_APT_MAINTENANCE}, BOOTSTRAP_APT_UPGRADE=${BOOTSTRAP_APT_UPGRADE}, BOOTSTRAP_APT_FULL_UPGRADE=${BOOTSTRAP_APT_FULL_UPGRADE}, BOOTSTRAP_APT_AUTOREMOVE=${BOOTSTRAP_APT_AUTOREMOVE}, BOOTSTRAP_APT_CLEAN=${BOOTSTRAP_APT_CLEAN}"
+  log "docker requirement: BOOTSTRAP_DOCKER_REQUIRED=${BOOTSTRAP_DOCKER_REQUIRED} (set 0 to skip docker check and continue installing other tools)"
   log "sha256 verification enabled for kubectl, kind, jq, kustomize, kubeconform, mkcert"
   log "set BOOTSTRAP_AUTO_CONFIRM=1 to auto-accept reinstalls"
   if have_cmd apt-get; then
@@ -1533,7 +1544,16 @@ main() {
   run_step "make" ensure_make
   run_step "python3" ensure_python
   run_step "openssl" ensure_openssl
-  run_step "docker" ensure_docker_running "${os}"
+  if [ "${BOOTSTRAP_DOCKER_REQUIRED}" = "0" ] || [ "${BOOTSTRAP_DOCKER_REQUIRED}" = "false" ]; then
+    if have_cmd docker && docker info >/dev/null 2>&1; then
+      run_step "docker" ensure_docker_running "${os}"
+    else
+      log "docker not available/running; skipping docker check (BOOTSTRAP_DOCKER_REQUIRED=0)"
+      summary_set "docker" "SKIP"
+    fi
+  else
+    run_step "docker" ensure_docker_running "${os}"
+  fi
   run_step "mkcert" ensure_mkcert "${os}" "${arch}"
 
   run_step "kubectl" ensure_kubectl "${os}" "${arch}"
@@ -1550,4 +1570,319 @@ main() {
   log "bootstrap complete"
 }
 
-main "$@"
+usage() {
+  cat <<'EOF'
+Usage: setup/ubuntu-22.04/setup.sh <command>
+
+Commands:
+  bootstrap   Install pinned dev tools into ./bin (default).
+  doctor      Check local toolchain + basic repo readiness.
+  hosts       Manage /etc/hosts dev block (requires sudo for apply/remove).
+
+Examples:
+  ./setup/ubuntu-22.04/setup.sh bootstrap
+  ./setup/ubuntu-22.04/setup.sh doctor
+  ./setup/ubuntu-22.04/setup.sh hosts status
+  ./setup/ubuntu-22.04/setup.sh hosts apply
+EOF
+}
+
+cmd_doctor() {
+  # Lightweight copy of the old hack/doctor.sh, kept as a subcommand to minimize script count.
+  version_ge() {
+    local min="$1"
+    local current="$2"
+    [ "$(printf '%s\n' "${min}" "${current}" | sort -V | head -n1)" = "${min}" ]
+  }
+
+  detect_source() {
+    local cmd="$1"
+    local path
+    path="$(command -v "${cmd}" 2>/dev/null || true)"
+    if [ -z "${path}" ]; then
+      echo "missing"
+      return
+    fi
+    if [ "${path#${HOME}/}" != "${path}" ]; then
+      echo "binary"
+      return
+    fi
+    if [[ "${path}" == /usr/local/bin/* ]] || [[ "${path}" == /opt/* ]]; then
+      echo "binary"
+      return
+    fi
+    if [[ "${path}" == /usr/bin/* ]] || [[ "${path}" == /bin/* ]] || [[ "${path}" == /sbin/* ]] || [[ "${path}" == /usr/sbin/* ]]; then
+      if command -v dpkg >/dev/null 2>&1 && dpkg -S "${path}" >/dev/null 2>&1; then
+        echo "apt"
+      else
+        echo "unknown"
+      fi
+      return
+    fi
+    echo "unknown"
+  }
+
+  check_exact() {
+    local name="$1"
+    local cmd="$2"
+    local current="$3"
+    local desired="$4"
+    local source
+    source="$(detect_source "${cmd}")"
+    if [ -z "${current}" ]; then
+      printf "%-12s %-8s FAIL (not found)\n" "${name}" "${source}"
+      return 1
+    fi
+    if [ "${current}" = "${desired}" ]; then
+      printf "%-12s %-8s OK   %s\n" "${name}" "${source}" "${current}"
+      return 0
+    fi
+    printf "%-12s %-8s WARN %s (expected %s)\n" "${name}" "${source}" "${current}" "${desired}"
+    return 2
+  }
+
+  check_min() {
+    local name="$1"
+    local cmd="$2"
+    local current="$3"
+    local min="$4"
+    local source
+    source="$(detect_source "${cmd}")"
+    if [ -z "${current}" ]; then
+      printf "%-12s %-8s FAIL (not found)\n" "${name}" "${source}"
+      return 1
+    fi
+    if version_ge "${min}" "${current}"; then
+      printf "%-12s %-8s OK   %s\n" "${name}" "${source}" "${current}"
+      return 0
+    fi
+    printf "%-12s %-8s WARN %s (min %s)\n" "${name}" "${source}" "${current}" "${min}"
+    return 2
+  }
+
+  get_kubectl_version() { command -v kubectl >/dev/null 2>&1 && kubectl version --client -o yaml 2>/dev/null | awk -F': ' '/gitVersion:/ {print $2; exit}'; }
+  get_kind_version() { command -v kind >/dev/null 2>&1 && kind version 2>/dev/null | awk '{print $2}'; }
+  get_jq_version() { command -v jq >/dev/null 2>&1 && jq --version 2>/dev/null | sed 's/^jq-//'; }
+  get_mkcert_version() { command -v mkcert >/dev/null 2>&1 && mkcert -version 2>/dev/null | head -n1 | awk '{print $1}' | sed 's/^v//'; }
+  get_kustomize_version() {
+    # Prefer repo-local pinned binary when present to avoid PATH / Windows interop edge cases.
+    if [ -x "${ROOT_DIR}/bin/kustomize" ]; then
+      "${ROOT_DIR}/bin/kustomize" version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1
+      return
+    fi
+    command -v kustomize >/dev/null 2>&1 && kustomize version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1
+  }
+  get_kubeconform_version() { command -v kubeconform >/dev/null 2>&1 && kubeconform -v 2>/dev/null | head -n1 | sed 's/^v//'; }
+  get_docker_version() { command -v docker >/dev/null 2>&1 && docker version --format '{{.Server.Version}}' 2>/dev/null | sed 's/[^0-9.].*$//'; }
+  get_git_version() { command -v git >/dev/null 2>&1 && git --version 2>/dev/null | awk '{print $3}'; }
+  get_make_version() { command -v make >/dev/null 2>&1 && make --version 2>/dev/null | head -n1 | awk '{print $3}'; }
+  get_python_version() { command -v python3 >/dev/null 2>&1 && python3 --version 2>/dev/null | awk '{print $2}'; }
+  get_openssl_version() { command -v openssl >/dev/null 2>&1 && openssl version 2>/dev/null | awk '{print $2}'; }
+  get_curl_version() { command -v curl >/dev/null 2>&1 && curl --version 2>/dev/null | head -n1 | awk '{print $2}'; }
+  get_wget_version() { command -v wget >/dev/null 2>&1 && wget --version 2>/dev/null | head -n1 | awk '{print $3}'; }
+  get_unzip_version() { command -v unzip >/dev/null 2>&1 && unzip -v 2>/dev/null | head -n1 | awk '{print $2}'; }
+
+  echo "Tool check:"
+  printf "%-12s %-8s %s\n" "component" "source" "status"
+  check_min "docker" "docker" "$(get_docker_version)" "${DOCKER_ENGINE_MIN_VERSION}" || true
+  check_min "git" "git" "$(get_git_version)" "${GIT_VERSION}" || true
+  check_min "make" "make" "$(get_make_version)" "${MAKE_VERSION}" || true
+  check_min "python3" "python3" "$(get_python_version)" "${PYTHON_VERSION}" || true
+  check_min "openssl" "openssl" "$(get_openssl_version)" "${OPENSSL_MIN_VERSION}" || true
+  check_min "curl" "curl" "$(get_curl_version)" "${CURL_MIN_VERSION}" || true
+  check_min "wget" "wget" "$(get_wget_version)" "${WGET_MIN_VERSION}" || true
+  check_min "unzip" "unzip" "$(get_unzip_version)" "${UNZIP_MIN_VERSION}" || true
+
+  check_exact "kubectl" "kubectl" "$(get_kubectl_version)" "${KUBECTL_VERSION}" || true
+  check_exact "kind" "kind" "$(get_kind_version)" "${KIND_VERSION}" || true
+  check_exact "jq" "jq" "$(get_jq_version)" "${JQ_VERSION}" || true
+  check_exact "mkcert" "mkcert" "$(get_mkcert_version)" "${MKCERT_VERSION}" || true
+  check_exact "kustomize" "kustomize" "$(get_kustomize_version)" "${KUSTOMIZE_VERSION}" || true
+  check_exact "kubeconform" "kubeconform" "$(get_kubeconform_version)" "${KUBECONFORM_VERSION}" || true
+
+  echo
+  if [ -f "${ROOT_DIR}/.env" ]; then
+    echo ".env present"
+  else
+    echo ".env missing (run: make dev-env-init)"
+  fi
+
+  if command -v kubectl >/dev/null 2>&1 && kubectl get ns dev >/dev/null 2>&1; then
+    if kubectl -n dev get secret app-secrets >/dev/null 2>&1; then
+      echo "app-secrets present in dev namespace"
+    else
+      echo "app-secrets not found in dev namespace"
+    fi
+  else
+    echo "dev namespace not found"
+  fi
+}
+
+cmd_hosts() {
+  local HOSTS_FILE="${HOSTS_FILE:-/etc/hosts}"
+  local BEGIN_MARKER="# BEGIN reliable-message-api dev"
+  local END_MARKER="# END reliable-message-api dev"
+  local -a ENTRIES=("127.0.0.1 api.local.dev" "127.0.0.1 kong.local.dev")
+
+  hosts_usage() {
+    cat <<'EOF'
+Usage: setup/ubuntu-22.04/setup.sh hosts <command>
+
+Commands:
+  status   Show whether the dev block exists and current name resolution.
+  apply    Add/replace the dev block in /etc/hosts (requires sudo).
+  remove   Remove the dev block from /etc/hosts (requires sudo).
+
+Environment:
+  HOSTS_FILE  Override hosts file path (default: /etc/hosts)
+EOF
+  }
+
+  need_root_or_sudo() {
+    if [ "$(id -u)" -eq 0 ]; then
+      return 0
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+      exec sudo HOSTS_FILE="${HOSTS_FILE}" "$0" hosts "$@"
+    fi
+    echo "ERROR: requires root to modify ${HOSTS_FILE} (sudo not found)." >&2
+    exit 1
+  }
+
+  strip_block() {
+    awk -v begin="${BEGIN_MARKER}" -v end="${END_MARKER}" '
+      $0 == begin {inblock=1; next}
+      $0 == end {inblock=0; next}
+      !inblock {print}
+    ' "${HOSTS_FILE}"
+  }
+
+  check_conflicts() {
+    awk -v begin="${BEGIN_MARKER}" -v end="${END_MARKER}" '
+      $0 == begin {inblock=1; next}
+      $0 == end {inblock=0; next}
+      inblock {next}
+      {
+        line=$0
+        sub(/#.*/, "", line)
+        if (line ~ /^[[:space:]]*$/) next
+        n=split(line, a, /[[:space:]]+/)
+        ip=a[1]
+        for (i=2; i<=n; i++) {
+          if (a[i] == "api.local.dev" || a[i] == "kong.local.dev") {
+            if (ip != "127.0.0.1") print $0
+          }
+        }
+      }
+    ' "${HOSTS_FILE}"
+  }
+
+  local sub="${1:-}"
+  case "${sub}" in
+    status)
+      if [ ! -f "${HOSTS_FILE}" ]; then
+        echo "ERROR: hosts file not found: ${HOSTS_FILE}" >&2
+        return 1
+      fi
+      if grep -Fq "${BEGIN_MARKER}" "${HOSTS_FILE}" 2>/dev/null; then
+        echo "hosts block: present"
+      else
+        echo "hosts block: missing"
+      fi
+      if command -v getent >/dev/null 2>&1; then
+        echo
+        echo "Resolution:"
+        getent hosts api.local.dev || true
+        getent hosts kong.local.dev || true
+      fi
+      ;;
+
+    apply)
+      if [ ! -f "${HOSTS_FILE}" ]; then
+        echo "ERROR: hosts file not found: ${HOSTS_FILE}" >&2
+        return 1
+      fi
+      need_root_or_sudo apply
+
+      local conflicts
+      conflicts="$(check_conflicts || true)"
+      if [ -n "${conflicts}" ]; then
+        echo "ERROR: found conflicting entries for api.local.dev/kong.local.dev in ${HOSTS_FILE}:" >&2
+        echo "${conflicts}" >&2
+        return 1
+      fi
+
+      local backup tmp
+      backup="${HOSTS_FILE}.bak.reliable-message-api.$(date +%s)"
+      cp -f "${HOSTS_FILE}" "${backup}"
+      tmp="$(mktemp)"
+      strip_block >"${tmp}"
+      {
+        echo
+        echo "${BEGIN_MARKER}"
+        for entry in "${ENTRIES[@]}"; do echo "${entry}"; done
+        echo "${END_MARKER}"
+        echo
+      } >>"${tmp}"
+      cat "${tmp}" >"${HOSTS_FILE}"
+      rm -f "${tmp}"
+      echo "Updated ${HOSTS_FILE}"
+      echo "Backup: ${backup}"
+      ;;
+
+    remove)
+      if [ ! -f "${HOSTS_FILE}" ]; then
+        echo "ERROR: hosts file not found: ${HOSTS_FILE}" >&2
+        return 1
+      fi
+      need_root_or_sudo remove
+      if ! grep -Fq "${BEGIN_MARKER}" "${HOSTS_FILE}" 2>/dev/null; then
+        echo "No dev block found in ${HOSTS_FILE} (nothing to do)."
+        return 0
+      fi
+      local backup tmp
+      backup="${HOSTS_FILE}.bak.reliable-message-api.$(date +%s)"
+      cp -f "${HOSTS_FILE}" "${backup}"
+      tmp="$(mktemp)"
+      strip_block >"${tmp}"
+      cat "${tmp}" >"${HOSTS_FILE}"
+      rm -f "${tmp}"
+      echo "Removed dev block from ${HOSTS_FILE}"
+      echo "Backup: ${backup}"
+      ;;
+
+    -h|--help|help|"")
+      hosts_usage
+      ;;
+
+    *)
+      echo "ERROR: unknown hosts subcommand: ${sub}" >&2
+      hosts_usage >&2
+      return 2
+      ;;
+  esac
+}
+
+cmd="${1:-bootstrap}"
+case "${cmd}" in
+  bootstrap)
+    shift || true
+    main "$@"
+    ;;
+  doctor)
+    shift || true
+    cmd_doctor "$@"
+    ;;
+  hosts)
+    shift || true
+    cmd_hosts "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "ERROR: unknown command: ${cmd}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
