@@ -10,3 +10,6 @@ resources:
   - datadog.yaml
   - ../dev/kong
   - postgres-init.yaml
+
+patches:
+  - path: api-datadog-patch.yaml

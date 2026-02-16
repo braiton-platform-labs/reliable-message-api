@@ -42,6 +42,8 @@ Usage:
 
 Notes:
   - This runs the real workflow inside WSL via ./scripts/dev_kind.sh.
+  - On 'up', it now runs the Datadog-enabled flow (equivalent to make dev-dd-bg/dev-dd-fg).
+    Ensure DD_API_KEY is set in .env so dev/datadog-secret can be created.
   - On 'up' it auto-applies Windows hosts for api.local.dev/kong.local.dev unless -SkipWindowsHosts.
   - By default, 'up' also tries to:
     - configure https://api.local.dev (no ':8443') by creating a Windows portproxy 443 -> 8443 (requires Admin/UAC)
@@ -75,6 +77,43 @@ function Ensure-WindowsHosts {
   & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SetupScriptPath hosts -HostsAction apply
 }
 
+function Sync-WindowsKindKubeconfig {
+  param(
+    [string]$ClusterName,
+    [string]$DistroName,
+    [string]$RepoWslPath
+  )
+
+  $resolvedCluster = if ([string]::IsNullOrWhiteSpace($ClusterName)) { "bpl-dev" } else { $ClusterName }
+  $kubeDir = Join-Path $env:USERPROFILE ".kube"
+  New-Item -ItemType Directory -Force -Path $kubeDir | Out-Null
+  $winKubeconfig = Join-Path $kubeDir ("kind-{0}.yaml" -f $resolvedCluster)
+
+  $winPathForWsl = $winKubeconfig -replace '\\','/'
+  if ($DistroName) {
+    $wslKubeconfig = (& wsl.exe -d $DistroName -- wslpath -a "$winPathForWsl")
+  } else {
+    $wslKubeconfig = (& wsl.exe wslpath -a "$winPathForWsl")
+  }
+  if (-not $wslKubeconfig) { throw "Failed to convert Windows kubeconfig path to WSL path." }
+  $wslKubeconfig = $wslKubeconfig.Trim()
+
+  $exportCmd = "cd '$RepoWslPath' && if [ -x ./bin/kind ]; then ./bin/kind export kubeconfig --name '$resolvedCluster' --kubeconfig '$wslKubeconfig' >/dev/null; " +
+               "elif command -v kind >/dev/null 2>&1; then kind export kubeconfig --name '$resolvedCluster' --kubeconfig '$wslKubeconfig' >/dev/null; " +
+               "else echo 'kind not found in WSL PATH or ./bin/kind' >&2; exit 127; fi"
+  if ($DistroName) {
+    & wsl.exe -d $DistroName -- bash -lc $exportCmd
+  } else {
+    & wsl.exe -- bash -lc $exportCmd
+  }
+  if ($LASTEXITCODE -ne 0) { throw "kind export kubeconfig failed for cluster '$resolvedCluster'." }
+  if (-not (Test-Path -LiteralPath $winKubeconfig)) {
+    throw "Expected kubeconfig file not found after export: $winKubeconfig"
+  }
+
+  Write-Output "Windows kubeconfig updated for Lens: $winKubeconfig"
+}
+
 $wslExe = (Get-Command wsl.exe -ErrorAction SilentlyContinue)
 if (-not $wslExe) { throw "wsl.exe not found. Install WSL and a Linux distro (Ubuntu 22.04 recommended)." }
 
@@ -82,6 +121,7 @@ if (-not $wslExe) { throw "wsl.exe not found. Install WSL and a Linux distro (Ub
 $repoRootForWslpath = $repoRoot -replace '\\','/'
 $wslPath = & wsl.exe wslpath -a "$repoRootForWslpath"
 if (-not $wslPath) { throw "Failed to convert repo path to WSL path via 'wsl wslpath'." }
+$wslPath = $wslPath.ToString().Trim()
 
 $args = @($Command)
 if ($Cluster) { $args += @("--cluster", $Cluster) }
@@ -118,12 +158,42 @@ if ($enableHttps443) {
   if ($Distro) { $httpsArgs += @("-Distro", $Distro) }
   if ($enableTrustCa) { $httpsArgs += "-TrustWslMkcertCa" }
 
+  # Execute via Start-Process so native stderr (for example missing mkcert in WSL)
+  # does not become a terminating NativeCommandError in this wrapper.
+  $httpsStdOutFile = [System.IO.Path]::GetTempFileName()
+  $httpsStdErrFile = [System.IO.Path]::GetTempFileName()
   try {
-    # This will self-elevate (UAC) if needed to configure portproxy.
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $httpsScript @httpsArgs
-  } catch {
-    if ($httpsStrict) { throw }
-    Write-Warning ("HTTPS no-port setup failed; continuing with default https://api.local.dev:8443. Error: {0}" -f $_.Exception.Message)
+    $httpsArgList = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$httpsScript) + $httpsArgs
+    $httpsProc = Start-Process -FilePath "powershell.exe" `
+      -ArgumentList $httpsArgList `
+      -Wait `
+      -PassThru `
+      -NoNewWindow `
+      -RedirectStandardOutput $httpsStdOutFile `
+      -RedirectStandardError $httpsStdErrFile
+    $httpsExitCode = $httpsProc.ExitCode
+    $httpsOutput = @()
+    if (Test-Path -LiteralPath $httpsStdOutFile) {
+      $httpsOutput += Get-Content -LiteralPath $httpsStdOutFile -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $httpsStdErrFile) {
+      $httpsOutput += Get-Content -LiteralPath $httpsStdErrFile -ErrorAction SilentlyContinue
+    }
+  } finally {
+    Remove-Item -LiteralPath $httpsStdOutFile,$httpsStdErrFile -Force -ErrorAction SilentlyContinue
+  }
+
+  if ($httpsExitCode -ne 0) {
+    $details = (($httpsOutput | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine).Trim()
+    if (-not $details) { $details = "exit code $httpsExitCode" }
+    if ($httpsStrict) {
+      throw "HTTPS no-port setup failed. $details"
+    }
+    Write-Warning ("HTTPS no-port setup failed; continuing with default https://api.local.dev:8443. Details: {0}" -f $details)
+  } else {
+    if ($httpsOutput.Count -gt 0) {
+      $httpsOutput | ForEach-Object { Write-Output $_ }
+    }
   }
 }
 
@@ -138,4 +208,17 @@ if ($Distro) {
   & wsl.exe -d $Distro -- bash -lc $bashCmd
 } else {
   & wsl.exe -- bash -lc $bashCmd
+}
+
+$wslExitCode = $LASTEXITCODE
+if ($wslExitCode -ne 0) {
+  exit $wslExitCode
+}
+
+if ($Command -eq "up") {
+  try {
+    Sync-WindowsKindKubeconfig -ClusterName $Cluster -DistroName $Distro -RepoWslPath $wslPath
+  } catch {
+    Write-Warning ("Failed to update Windows kubeconfig for Lens: {0}" -f $_.Exception.Message)
+  }
 }

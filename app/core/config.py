@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     dd_env: str = Field(default="local", alias="DD_ENV")
     dd_version: str = Field(default="0.1.0", alias="DD_VERSION")
     dd_agent_host: str | None = Field(default=None, alias="DD_AGENT_HOST")
+    dd_trace_agent_url: str | None = Field(default=None, alias="DD_TRACE_AGENT_URL")
+    dd_dogstatsd_port: int = Field(default=8125, alias="DD_DOGSTATSD_PORT")
 
     metrics_enabled: bool = Field(default=True, alias="METRICS_ENABLED")
     stats_enabled: bool = Field(default=True, alias="STATS_ENABLED")

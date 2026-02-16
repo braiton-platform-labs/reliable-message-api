@@ -27,6 +27,14 @@ REQUEST_LATENCY = Histogram(
 MESSAGES_CREATED = Counter("messages_created_total", "Messages created")
 MESSAGES_DUPLICATE = Counter("messages_duplicate_total", "Duplicate messages")
 MESSAGES_INVALID = Counter("messages_invalid_total", "Invalid message requests")
+MESSAGES_IDEMPOTENCY_REPLAY = Counter(
+    "messages_idempotency_replay_total",
+    "Idempotency key replay hits",
+)
+MESSAGES_IDEMPOTENCY_CONFLICT = Counter(
+    "messages_idempotency_conflict_total",
+    "Idempotency key conflict responses",
+)
 
 
 @dataclass
@@ -44,12 +52,22 @@ class Stats:
 
 
 stats = Stats()
+_statsd_configured = False
 
 
 def _configure_statsd() -> bool:
+    global _statsd_configured
     settings = get_settings()
     if settings.dd_agent_host and statsd is not None:
-        statsd.host = settings.dd_agent_host
+        if not _statsd_configured:
+            statsd.host = settings.dd_agent_host
+            statsd.port = settings.dd_dogstatsd_port
+            statsd.constant_tags = [
+                f"service:{settings.dd_service}",
+                f"env:{settings.dd_env}",
+                f"version:{settings.dd_version}",
+            ]
+            _statsd_configured = True
         return True
     return False
 
@@ -113,6 +131,26 @@ def record_message_invalid() -> None:
             statsd.increment("messages.invalid")
     if settings.stats_enabled:
         stats.inc("messages.invalid")
+
+
+def record_message_idempotency_replay() -> None:
+    settings = get_settings()
+    if settings.metrics_enabled:
+        MESSAGES_IDEMPOTENCY_REPLAY.inc()
+        if _configure_statsd():
+            statsd.increment("messages.idempotency.replay")
+    if settings.stats_enabled:
+        stats.inc("messages.idempotency.replay")
+
+
+def record_message_idempotency_conflict() -> None:
+    settings = get_settings()
+    if settings.metrics_enabled:
+        MESSAGES_IDEMPOTENCY_CONFLICT.inc()
+        if _configure_statsd():
+            statsd.increment("messages.idempotency.conflict")
+    if settings.stats_enabled:
+        stats.inc("messages.idempotency.conflict")
 
 
 def now_ms() -> float:

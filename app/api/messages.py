@@ -13,6 +13,8 @@ from app.db.session import get_db
 from app.observability.metrics import (
     record_message_created,
     record_message_duplicate,
+    record_message_idempotency_conflict,
+    record_message_idempotency_replay,
     record_message_invalid,
 )
 from app.services import messages as message_service
@@ -37,7 +39,9 @@ def create_message(
         body, status_code, replay = message_service.create_message(
             db, payload.message, idempotency_key
         )
-        if not replay:
+        if replay:
+            record_message_idempotency_replay()
+        else:
             record_message_created()
         return JSONResponse(status_code=status_code, content=body)
     except ValidationError as exc:
@@ -47,6 +51,7 @@ def create_message(
         record_message_duplicate()
         return error_response(409, "duplicate", "Message already exists")
     except IdempotencyConflictError as exc:
+        record_message_idempotency_conflict()
         return error_response(409, "idempotency_conflict", str(exc))
 
 

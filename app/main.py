@@ -64,6 +64,8 @@ def stats_endpoint() -> dict[str, Any]:
         "created": counters.get("messages.created", 0),
         "duplicate": counters.get("messages.duplicate", 0),
         "invalid": counters.get("messages.invalid", 0),
+        "idempotency_replay": counters.get("messages.idempotency.replay", 0),
+        "idempotency_conflict": counters.get("messages.idempotency.conflict", 0),
     }
     requests_by_method: dict[str, int] = {}
     requests_by_path: dict[str, int] = {}

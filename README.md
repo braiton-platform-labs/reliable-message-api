@@ -48,7 +48,8 @@ powershell -ExecutionPolicy Bypass -File .\\scripts\\dev_kind.ps1 up
 ```
 This will:
 - Ensure the Windows hosts entries exist (`api.local.dev`, `kong.local.dev`) so Postman can hit the correct virtual hosts.
-- Invoke the WSL dev flow (`make bootstrap` + `make dev` + verification) using the repo scripts.
+- Invoke the WSL dev flow (`make bootstrap` + `make dev-dd-bg` + verification) using the repo scripts.
+- Require `DD_API_KEY` in `.env` to create `dev/datadog-secret` and start Datadog components.
 
 Lens (Kubernetes IDE) on Windows:
 - Export the kind kubeconfig to a Windows file and import it in Lens:
@@ -259,8 +260,11 @@ After changing `.env` values:
 - If it only affects the API: run `make dev-rollout` (restarts the API to pick up updated env vars).
 - If it affects Kong/KIC: run `make dev-rollout-all`.
 
-Required keys (dev overlay):
-`DATABASE_URL`, `REQUIRE_API_KEY`, `API_KEY`, `METRICS_ENABLED`, `STATS_ENABLED`, `IDEMPOTENCY_TTL_HOURS`, `DD_SERVICE`, `DD_ENV`, `DD_VERSION`, `DD_AGENT_HOST`, `DD_TRACE_AGENT_URL`, `DD_API_KEY` (can be empty unless using `dev-dd`), `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `KONG_PG_PASSWORD`, `KONG_ADMIN_GUI_USER`, `KONG_ADMIN_GUI_PASSWORD`, `KONG_ADMIN_TOKEN`, `KONG_ADMIN_GUI_SESSION_CONF`, `KONG_RBAC_USERS`.
+Required keys (minimum):
+`DATABASE_URL`, `REQUIRE_API_KEY`, `API_KEY`, `METRICS_ENABLED`, `STATS_ENABLED`, `IDEMPOTENCY_TTL_HOURS`, `DD_SERVICE`, `DD_ENV`, `DD_VERSION`, `DD_AGENT_HOST`, `DD_TRACE_AGENT_URL`, `DD_API_KEY`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `KONG_PG_PASSWORD`, `KONG_ADMIN_GUI_USER`, `KONG_ADMIN_GUI_PASSWORD`, `KONG_ADMIN_TOKEN`, `KONG_ADMIN_GUI_SESSION_CONF`, `KONG_RBAC_USERS`.
+
+Recommended Datadog keys for richer telemetry (`dev-dd`):
+`DD_SITE`, `DD_DOGSTATSD_PORT`, `DD_LOGS_INJECTION`, `DD_RUNTIME_METRICS_ENABLED`, `DD_PROFILING_ENABLED`, `DD_APPSEC_ENABLED`, `DD_IAST_ENABLED`, `DD_APPSEC_SCA_ENABLED`, `DD_TRACE_SAMPLE_RATE`, `DD_TRACE_128_BIT_TRACEID_GENERATION_ENABLED`, `DD_TRACE_PROPAGATION_STYLE_INJECT`, `DD_TRACE_PROPAGATION_STYLE_EXTRACT`, `DD_APP_KEY` (optional).
 
 ## Kong/KIC validation (dev)
 
@@ -319,7 +323,7 @@ Uninstall and attempt to remove OS dependencies (dangerous):
 ## Kubernetes Manifests
 - `k8s/base`: API Deployment + Service.
 - `k8s/overlays/dev`: dev namespace + Postgres StatefulSet + PVC.
-- `k8s/overlays/dev-dd`: same as dev, plus Datadog agent Deployment/Service.
+- `k8s/overlays/dev-dd`: same as dev, plus Datadog Operator-managed `DatadogAgent` with broad observability features enabled.
 Kong (gateway) for local dev is included in the dev overlays and proxies requests to the API.
 Kong runs with Postgres (same instance as the app, using the `kong` database) to enable plugins and UI.
 
@@ -409,15 +413,33 @@ Note: `/health` and `/ready` are always unauthenticated to support Kubernetes pr
 - JSON logs with log-trace correlation (dd.trace_id / dd.span_id)
 - Prometheus metrics at `/metrics`
 - DogStatsD metrics sent when `DD_AGENT_HOST` is configured
+- Datadog Operator + DatadogAgent (`dev-dd`) enabling logs/APM/OTLP/process/container/orchestrator/USM/NPM/SBOM and related cluster telemetry
+- Business spans for message flows (create/list/get/delete/reset)
 
-Optional local Datadog agent overlay:
+Enable full local Datadog stack:
 `make dev-dd`
-Requires `DD_API_KEY` (and usually `DD_AGENT_HOST=datadog-agent`, `DD_TRACE_AGENT_URL=http://datadog-agent:8126`) in `.env`.
+
+Requirements:
+- `DD_API_KEY` set in `.env` (valid key for your Datadog org/site).
+- `make dev-dd` installs Datadog Operator (`DATADOG_OPERATOR_VERSION` in `Makefile`), creates `dev/datadog-secret` from `DD_API_KEY`, and applies `k8s/overlays/dev-dd`.
+- In `dev-dd`, API pods use node-local Datadog Agent automatically (`DD_AGENT_HOST=status.hostIP`).
+- On Docker Desktop/kind, some kernel-level features (for example CWS/NPM/USM/CSPM/eBPF) can report degraded status; disable specific feature flags in `k8s/overlays/dev-dd/datadog.yaml` if needed.
+
+Equivalent manual install flow (Datadog wizard style):
+```bash
+helm repo add datadog https://helm.datadoghq.com
+helm upgrade --install datadog-operator datadog/datadog-operator --namespace system --create-namespace
+kubectl -n dev create secret generic datadog-secret --from-literal api-key="$DD_API_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -k k8s/overlays/dev-dd
+```
 
 Custom metrics:
 - `messages.created`
 - `messages.duplicate`
 - `messages.invalid`
+- `messages.idempotency.replay`
+- `messages.idempotency.conflict`
 - `http.requests.by_route`
 - `request.latency`
 
@@ -434,7 +456,7 @@ Returns (example):
 - `db.messages_stored`: total stored messages
 - `db.idempotency_keys_stored`: total stored idempotency keys
 - `requests.total`, `requests.by_method`, `requests.by_path`, `requests.responses_by_status`
-- `messages.created`, `messages.duplicate`, `messages.invalid`
+- `messages.created`, `messages.duplicate`, `messages.invalid`, `messages.idempotency_replay`, `messages.idempotency_conflict`
 
 ## Local Examples
 

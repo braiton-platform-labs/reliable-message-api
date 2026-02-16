@@ -1,56 +1,167 @@
-apiVersion: v1
-kind: Service
+apiVersion: datadoghq.com/v2alpha1
+kind: DatadogAgent
 metadata:
-  name: datadog-agent
-  labels:
-    app: datadog-agent
+  name: datadog
 spec:
-  type: ClusterIP
-  selector:
-    app: datadog-agent
-  ports:
-    - name: trace
-      port: 8126
-      targetPort: 8126
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: datadog-agent
-  labels:
-    app: datadog-agent
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: datadog-agent
-  template:
-    metadata:
-      labels:
-        app: datadog-agent
-    spec:
+  global:
+    clusterName: kind-bpl-dev
+    site: datadoghq.com
+    credentials:
+      apiSecret:
+        secretName: datadog-secret
+        keyName: api-key
+    tags:
+      - env:dev
+      - service:reliable-message-api
+      - project:reliable-message-api
+      - managed-by:datadog-operator
+    kubelet:
+      host:
+        fieldRef:
+          fieldPath: spec.nodeName
+      tlsVerify: false
+  features:
+    admissionController:
+      enabled: true
+      mutateUnlabelled: true
+    asm:
+      threats:
+        enabled: true
+      sca:
+        enabled: true
+      iast:
+        enabled: true
+    apm:
+      enabled: true
+      instrumentation:
+        enabled: true
+        targets:
+          - name: default-target
+            ddTraceVersions:
+              java: "1"
+              python: "4"
+              js: "5"
+              php: "1"
+              dotnet: "3"
+              ruby: "2"
+            ddTraceConfigs:
+              - name: DD_PROFILING_ENABLED
+                value: auto
+              - name: DD_DATA_STREAMS_ENABLED
+                value: "true"
+      hostPortConfig:
+        enabled: true
+        hostPort: 8126
+    clusterChecks:
+      enabled: true
+    cspm:
+      enabled: true
+    cws:
+      enabled: true
+    dogstatsd:
+      nonLocalTraffic: true
+      hostPortConfig:
+        enabled: true
+        hostPort: 8125
+      originDetectionEnabled: true
+    ebpfCheck:
+      enabled: true
+    eventCollection:
+      collectKubernetesEvents: true
+    kubeStateMetricsCore:
+      enabled: true
+    liveContainerCollection:
+      enabled: true
+    liveProcessCollection:
+      enabled: true
+    logCollection:
+      enabled: true
+      containerCollectAll: true
+      containerCollectUsingFiles: true
+      autoMultiLineDetection: true
+    npm:
+      enabled: true
+    oomKill:
+      enabled: true
+    orchestratorExplorer:
+      enabled: true
+    otelCollector:
+      enabled: true
+      ports:
+        - containerPort: 4317
+          hostPort: 4317
+          name: otel-grpc
+        - containerPort: 4318
+          hostPort: 4318
+          name: otel-http
+    processDiscovery:
+      enabled: true
+    prometheusScrape:
+      enabled: true
+    remoteConfiguration:
+      enabled: true
+    sbom:
+      enabled: true
+      containerImage:
+        enabled: true
+      host:
+        enabled: true
+    serviceDiscovery:
+      enabled: true
+      networkStats:
+        enabled: true
+    tcpQueueLength:
+      enabled: true
+    usm:
+      enabled: true
+  override:
+    clusterAgent:
+      replicas: 1
       containers:
-        - name: datadog-agent
-          image: gcr.io/datadoghq/agent:7
-          ports:
-            - containerPort: 8126
-              name: trace
-          env:
-            - name: DD_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: app-secrets
-                  key: DD_API_KEY
-            - name: DD_APM_ENABLED
-              value: "true"
-            - name: DD_LOGS_ENABLED
-              value: "true"
-            - name: DD_DOGSTATSD_NON_LOCAL_TRAFFIC
-              value: "true"
+        cluster-agent:
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+    nodeAgent:
+      env:
+        - name: DD_HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+      containers:
+        agent:
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "800m"
+              memory: "1Gi"
+        process-agent:
           resources:
             requests:
               cpu: "100m"
-              memory: "128Mi"
+              memory: "256Mi"
             limits:
-              cpu: "500m"
+              cpu: "300m"
+              memory: "512Mi"
+        trace-agent:
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "300m"
+              memory: "512Mi"
+        security-agent:
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "300m"
               memory: "512Mi"
