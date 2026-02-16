@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    metadata:
+      labels:
+        tags.datadoghq.com/env: dev
+        tags.datadoghq.com/service: reliable-message-api
+        tags.datadoghq.com/version: "0.1.0"
+      annotations:
+        ad.datadoghq.com/api.checks: |
+          {
+            "openmetrics": {
+              "init_config": {},
+              "instances": [
+                {
+                  "openmetrics_endpoint": "http://%%host%%:8000/metrics",
+                  "namespace": "reliable_message_api",
+                  "metrics": [".*"]
+                }
+              ]
+            }
+          }
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: DD_AGENT_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: DD_TRACE_AGENT_URL
+              value: http://$(DD_AGENT_HOST):8126
+            - name: DD_DOGSTATSD_PORT
+              value: "8125"
+            - name: DD_ENTITY_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: DD_LOGS_INJECTION
+              value: "true"
+            - name: DD_RUNTIME_METRICS_ENABLED
+              value: "true"
+            - name: DD_PROFILING_ENABLED
+              value: "true"
+            - name: DD_APPSEC_ENABLED
+              value: "true"
+            - name: DD_IAST_ENABLED
+              value: "true"
+            - name: DD_APPSEC_SCA_ENABLED
+              value: "true"
+            - name: DD_TRACE_128_BIT_TRACEID_GENERATION_ENABLED
+              value: "true"
+            - name: DD_TRACE_SAMPLE_RATE
+              value: "1.0"
+            - name: DD_TRACE_PROPAGATION_STYLE_INJECT
+              value: datadog,tracecontext,baggage
+            - name: DD_TRACE_PROPAGATION_STYLE_EXTRACT
+              value: datadog,tracecontext,baggage

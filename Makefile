@@ -1,5 +1,5 @@
-.PHONY: help test lint format kind-up kind-down dev-context dev-env-init dev-secrets-apply dev-build dev-kind-load dev-apply dev-dd \
-	dev-up dev-fg dev-reload dev-rollout dev-rollout-all dev-port dev-port-bg dev-port-stop dev-port-status dev-port-logs dev-reset dev-verify dev dev-status \
+.PHONY: help test lint format kind-up kind-down dev-context dev-env-init dev-secrets-apply dev-dd-secret-apply dev-build dev-kind-load dev-apply dev-dd dev-dd-operator-install \
+	dev-up dev-up-dd dev-fg dev-dd-fg dev-dd-bg dev-reload dev-rollout dev-rollout-all dev-port dev-port-bg dev-port-stop dev-port-status dev-port-logs dev-reset dev-verify dev dev-status \
 	dev-logs dev-psql dev-port-kong-admin dev-tls dev-kong-whitelist dev-kong-user dev-kong-user-remove dev-kong-crds-install \
 	dev-hosts-status dev-hosts-apply dev-hosts-remove dev-hosts-status-win dev-hosts-apply-win dev-hosts-remove-win \
 	dev-metrics-install k8s-validate dev-clean dev-nuke kustomize-bin kubeconform-bin doctor bootstrap bootstrap-full first-run
@@ -26,6 +26,8 @@ DEV_HTTPS_PORT ?= 8443
 DEV_PORT_FORWARD_ADDR ?= 127.0.0.1
 DEV_PORT_FORWARD_DIR ?= /tmp/reliable-message-api-dev-$(KIND_CLUSTER_NAME)
 DEV_WAIT_TIMEOUT ?= 300s
+DATADOG_OPERATOR_VERSION ?= v1.23.1
+DATADOG_OPERATOR_KUSTOMIZE ?= github.com/DataDog/datadog-operator/config/default?ref=$(DATADOG_OPERATOR_VERSION)
 
 BIN_DIR ?= bin
 
@@ -58,12 +60,16 @@ help:
 	@echo "  make bootstrap          Install pinned tools into ./bin (fast; no sysctl/apt changes)"
 	@echo "  make doctor             Check your local toolchain/environment"
 	@echo "  make dev                Full local dev flow (apply + restart + port-forward in background)"
+	@echo "  make dev-dd-bg          Full local dev flow + Datadog (apply + restart + port-forward in background)"
 	@echo "  make dev-fg             Same as dev, but keeps port-forward in foreground (Ctrl+C to stop)"
+	@echo "  make dev-dd-fg          Same as dev-dd-bg, but keeps port-forward in foreground (Ctrl+C to stop)"
 	@echo "  make dev-up             Provision/apply/restart/wait (no port-forward)"
+	@echo "  make dev-up-dd          Provision/apply/restart/wait with Datadog (no port-forward)"
 	@echo "  make dev-reload         Fast loop: build+load and restart only the API"
 	@echo "  make dev-port-bg        Start/restart port-forward in background and exit"
 	@echo "  make dev-port-stop      Stop background port-forward (if running)"
 	@echo "  make dev-dd             Apply dev-dd overlay (includes Datadog agent)"
+	@echo "  make dev-dd-secret-apply Apply Datadog secret (dev/datadog-secret) from DD_API_KEY in $(ENV_FILE)"
 	@echo "  make dev-secrets-apply   Apply dev/app-secrets from $(ENV_FILE)"
 	@echo "  make k8s-validate        Validate k8s manifests with kubeconform"
 	@echo "  make dev-clean           Clean dev namespace, kind cluster, and build cache"
@@ -313,7 +319,68 @@ dev-kind-load: dev-context dev-build
 dev-apply: dev-context kustomize-bin dev-kind-load dev-kong-crds-install
 	$(KUSTOMIZE_BIN) build k8s/overlays/dev | kubectl apply -f -
 
-dev-dd: dev-context kustomize-bin dev-kind-load dev-kong-crds-install
+dev-dd-operator-install: dev-context
+	@set -e; \
+	echo "==> Installing/Updating Datadog Operator ($(DATADOG_OPERATOR_VERSION))..."; \
+	# The next step uses `kubectl set env` to pin WATCH_NAMESPACE=dev. That changes env entries
+	# from `valueFrom` to static `value`, and a later server-side apply can fail with
+	# "valueFrom may not be specified when value is not empty". Recreate only the Deployment
+	# before re-applying manifests to keep this target idempotent in local dev.
+	for cand in datadog-operator-manager datadog-operator-controller-manager; do \
+		if kubectl -n system get deployment/$$cand >/dev/null 2>&1; then \
+			echo "==> Resetting existing Datadog Operator deployment ($$cand) to avoid env-field conflicts..."; \
+			kubectl -n system delete deployment/$$cand --ignore-not-found >/dev/null; \
+		fi; \
+	done; \
+	# Use server-side apply to avoid oversized client-side 'last-applied-configuration' annotations on large CRDs. \
+	# In local dev, force conflict resolution so we can take ownership from prior client-side/helm managers. \
+	kubectl apply --server-side --force-conflicts -k "$(DATADOG_OPERATOR_KUSTOMIZE)" >/dev/null; \
+	echo "==> Waiting for Datadog CRDs..."; \
+	kubectl wait --for=condition=Established crd/datadogagents.datadoghq.com --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Waiting for Datadog Operator rollout..."; \
+	dd_deploy="$$(kubectl -n system get deploy -l app.kubernetes.io/name=datadog-operator -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"; \
+	if [ -z "$$dd_deploy" ]; then \
+		for cand in datadog-operator-manager datadog-operator-controller-manager; do \
+			if kubectl -n system get deployment/$$cand >/dev/null 2>&1; then dd_deploy="$$cand"; break; fi; \
+		done; \
+	fi; \
+	if [ -z "$$dd_deploy" ]; then \
+		echo "ERROR: Datadog Operator deployment not found in namespace system."; \
+		kubectl -n system get deploy || true; \
+		exit 1; \
+	fi; \
+	echo "==> Disabling Datadog auto-instrumentation on operator deployment..."; \
+	kubectl -n system patch deployment/$$dd_deploy --type=merge \
+		-p '{"spec":{"template":{"metadata":{"labels":{"admission.datadoghq.com/enabled":"false"}}}}}' >/dev/null; \
+	echo "==> Configuring Datadog Operator watch namespace (dev)..."; \
+	kubectl -n system set env deployment/$$dd_deploy WATCH_NAMESPACE=dev DD_AGENT_WATCH_NAMESPACE=dev >/dev/null; \
+	kubectl -n system rollout status deployment/$$dd_deploy --timeout=$(DEV_WAIT_TIMEOUT) >/dev/null; \
+	echo "==> Datadog Operator is ready."
+
+dev-dd-secret-apply: dev-context dev-env-init
+	@set -e; \
+	if [ ! -f "$(ENV_FILE)" ]; then \
+		echo "ERROR: $(ENV_FILE) not found."; \
+		echo "Create it (or run: make dev-env-init) and re-run."; \
+		exit 1; \
+	fi; \
+	dd_api_key="$$(sed -n 's/^DD_API_KEY=//p' "$(ENV_FILE)" | tail -n 1)"; \
+	if [ -z "$$dd_api_key" ] || [ "$$dd_api_key" = "change-me" ]; then \
+		echo "ERROR: DD_API_KEY is empty in $(ENV_FILE)."; \
+		echo "Set DD_API_KEY and run: make dev-dd-secret-apply"; \
+		exit 1; \
+	fi; \
+	kubectl apply -f k8s/overlays/dev/namespace.yaml >/dev/null; \
+	kubectl -n dev create secret generic datadog-secret \
+		--from-literal=api-key="$$dd_api_key" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null; \
+	kubectl -n dev annotate secret datadog-secret \
+		--overwrite \
+		datadog-secret.bpl/refreshedAtEpoch="$$(date +%s)" \
+		datadog-secret.bpl/refreshedAt="$$(date -Is)" >/dev/null 2>&1 || true; \
+	echo "==> datadog-secret applied in namespace dev."
+
+dev-dd: dev-context kustomize-bin dev-kind-load dev-kong-crds-install dev-dd-operator-install dev-dd-secret-apply
 	$(KUSTOMIZE_BIN) build k8s/overlays/dev-dd | kubectl apply -f -
 
 dev-reload: dev-kind-load
@@ -713,12 +780,32 @@ dev-up:
 	@echo "==> Port-forward (bg): make dev-port-bg"
 	@echo "==> Port-forward (fg): make dev-port"
 
+dev-up-dd:
+	$(MAKE) kind-up
+	$(MAKE) dev-context
+	$(MAKE) dev-secrets-apply
+	$(MAKE) dev-tls
+	$(MAKE) dev-kong-whitelist
+	$(MAKE) dev-dd
+	$(MAKE) dev-rollout
+	@echo "==> Dev + Datadog environment ready."
+	@echo "==> Port-forward (bg): make dev-port-bg"
+	@echo "==> Port-forward (fg): make dev-port"
+
 dev:
 	$(MAKE) dev-up
 	$(MAKE) dev-port-bg
 
+dev-dd-bg:
+	$(MAKE) dev-up-dd
+	$(MAKE) dev-port-bg
+
 dev-fg:
 	$(MAKE) dev-up
+	$(MAKE) dev-port
+
+dev-dd-fg:
+	$(MAKE) dev-up-dd
 	$(MAKE) dev-port
 
 dev-verify: dev-context

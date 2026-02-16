@@ -3,8 +3,8 @@ param(
   [ValidateSet("enable","disable","status","help")]
   [string]$Command = "status",
 
-  # WSL distro used by the repo scripts.
-  [string]$Distro = "Ubuntu-22.04",
+  # WSL distro used by the repo scripts. Empty means "use WSL default distro".
+  [string]$Distro = "",
 
   # kind defaults (Kong port-forward binds to these on Windows host).
   [int]$ListenPort = 443,
@@ -168,15 +168,34 @@ function Trust-WslMkcertCa {
   $wslExe = (Get-Command wsl.exe -ErrorAction SilentlyContinue)
   if (-not $wslExe) { throw "wsl.exe not found." }
 
+  $invokeWsl = {
+    param([string]$Cmd)
+    if ($Distro) {
+      & wsl.exe -d $Distro -- bash -lc $Cmd 2>$null
+    } else {
+      & wsl.exe -- bash -lc $Cmd 2>$null
+    }
+  }
+
+  $hasMkcertRaw = & $invokeWsl "command -v mkcert >/dev/null 2>&1 && echo yes || true"
+  $hasMkcertFirst = $hasMkcertRaw | Select-Object -First 1
+  $hasMkcert = if ($null -ne $hasMkcertFirst) { $hasMkcertFirst.ToString().Trim() } else { "" }
+  if ($hasMkcert -ne "yes") {
+    throw "mkcert not found in WSL PATH. Run: .\\scripts\\wsl_bootstrap.ps1"
+  }
+
   # Use mkcert inside WSL (installed by scripts/wsl_bootstrap.ps1).
-  $caroot = (& wsl.exe -d $Distro -- bash -lc "mkcert -CAROOT" 2>$null | Select-Object -First 1).ToString().Trim()
+  $carootRaw = & $invokeWsl "mkcert -CAROOT"
+  $carootFirst = $carootRaw | Select-Object -First 1
+  $caroot = if ($null -ne $carootFirst) { $carootFirst.ToString().Trim() } else { "" }
   if (-not $caroot) { throw "Failed to read mkcert CAROOT in WSL. Is mkcert installed? Run: .\\scripts\\wsl_bootstrap.ps1" }
 
   # Read rootCA.pem (public cert) and write to a Windows temp file.
-  $pem = & wsl.exe -d $Distro -- bash -lc "cat '$caroot/rootCA.pem'" 2>$null
+  $pem = & $invokeWsl "cat '$caroot/rootCA.pem'"
   if (-not $pem) { throw "Failed to read $caroot/rootCA.pem from WSL." }
 
-  $outFile = Join-Path $env:TEMP ("mkcert-wsl-rootCA-{0}.pem" -f $Distro)
+  $distroLabel = if ($Distro) { $Distro } else { "default" }
+  $outFile = Join-Path $env:TEMP ("mkcert-wsl-rootCA-{0}.pem" -f $distroLabel)
   Set-Content -LiteralPath $outFile -Value $pem -Encoding Ascii
 
   # Import into CurrentUser Root store (no admin required).
@@ -268,37 +287,42 @@ function Print-Status {
   }
 }
 
-if ($Command -eq "help") { Usage; exit 0 }
+try {
+  if ($Command -eq "help") { Usage; exit 0 }
 
-$repoRoot = Get-RepoRoot
+  $repoRoot = Get-RepoRoot
 
-switch ($Command) {
-  "status" {
-    Print-Status -RepoRoot $repoRoot -ListenAddr $ListenAddress -ListenPort $ListenPort -TargetAddr $TargetAddress -TargetPort $TargetPort
-    exit 0
-  }
-
-  "enable" {
-    # Hosts entries are required for api.local.dev to resolve to 127.0.0.1.
-    if (-not $SkipHosts) { Ensure-WindowsHosts -RepoRoot $repoRoot }
-
-    if ($TrustWslMkcertCa) {
-      Trust-WslMkcertCa -Distro $Distro
+  switch ($Command) {
+    "status" {
+      Print-Status -RepoRoot $repoRoot -ListenAddr $ListenAddress -ListenPort $ListenPort -TargetAddr $TargetAddress -TargetPort $TargetPort
+      exit 0
     }
 
-    Enable-PortProxy -ListenAddr $ListenAddress -ListenPort $ListenPort -TargetAddr $TargetAddress -TargetPort $TargetPort
-    Write-Output "Enabled: https://api.local.dev (no port) via portproxy $ListenAddress`:$ListenPort -> $TargetAddress`:$TargetPort"
-    exit 0
-  }
+    "enable" {
+      # Hosts entries are required for api.local.dev to resolve to 127.0.0.1.
+      if (-not $SkipHosts) { Ensure-WindowsHosts -RepoRoot $repoRoot }
 
-  "disable" {
-    Disable-PortProxy -ListenAddr $ListenAddress -ListenPort $ListenPort
-    Write-Output "Disabled portproxy for $ListenAddress`:$ListenPort"
-    exit 0
-  }
+      if ($TrustWslMkcertCa) {
+        Trust-WslMkcertCa -Distro $Distro
+      }
 
-  default {
-    Usage
-    exit 2
+      Enable-PortProxy -ListenAddr $ListenAddress -ListenPort $ListenPort -TargetAddr $TargetAddress -TargetPort $TargetPort
+      Write-Output "Enabled: https://api.local.dev (no port) via portproxy $ListenAddress`:$ListenPort -> $TargetAddress`:$TargetPort"
+      exit 0
+    }
+
+    "disable" {
+      Disable-PortProxy -ListenAddr $ListenAddress -ListenPort $ListenPort
+      Write-Output "Disabled portproxy for $ListenAddress`:$ListenPort"
+      exit 0
+    }
+
+    default {
+      Usage
+      exit 2
+    }
   }
+} catch {
+  [Console]::Error.WriteLine("ERROR: {0}" -f $_.Exception.Message)
+  exit 1
 }

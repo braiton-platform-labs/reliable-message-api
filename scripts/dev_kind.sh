@@ -18,6 +18,7 @@ Notes:
   - Prefer running this inside WSL (Ubuntu 22.04). It relies on the repo Makefile (POSIX shell).
   - KIND_CLUSTER_NAME / KIND_WORKERS can also be set via environment variables.
   - --hosts runs 'make dev-hosts-apply' (may require sudo inside WSL).
+  - 'up' uses the Datadog-enabled flow (make dev-dd-bg/dev-dd-fg) and requires DD_API_KEY in .env.
 EOF
 }
 
@@ -99,11 +100,11 @@ case "$cmd" in
     fi
 
     if [ "$foreground" -eq 1 ]; then
-      say "==> Bringing up dev (foreground port-forward)..."
-      make dev-fg
+      say "==> Bringing up dev + Datadog (foreground port-forward)..."
+      make dev-dd-fg
     else
-      say "==> Bringing up dev (background port-forward)..."
-      make dev
+      say "==> Bringing up dev + Datadog (background port-forward)..."
+      make dev-dd-bg
     fi
 
     if [ "$skip_verify" -eq 0 ]; then
